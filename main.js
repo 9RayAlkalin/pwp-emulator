@@ -537,18 +537,71 @@ const rotate_point = (x, y, r, deg) => {
     ];
 };
 
-const get_blur_img = (img, r) => {
-    r *= (img.width + img.height);
-    const tempcv = document.createElement("canvas");
-    tempcv.width = img.width;
-    tempcv.height = img.height;
-    const tempctx = tempcv.getContext("2d");
-    const morescale = Math.max(r / img.width, r / img.height);
-    tempctx.scale(1 + morescale, 1 + morescale);
-    tempctx.translate(-r / 2, -r / 2);
-    tempctx.filter = `blur(${r}px)`;
-    tempctx.drawImage(img, 0, 0);
-    return tempcv;
+// LevelControl.Start 加载 IllustrationBlur（256×135 / 6.25 PPU），不是高清曲绘。
+// BackgroundScaler 的世界大小仍为40.96×21.6、scale=.463，宽屏继续等比放大。
+// LeTai.Asset.TranslucentImage.ScalableBlur 再对屏幕捕获做四对角采样。
+let game_background_cache = null;
+const game_background = (w, h) => {
+    const image = C.chart.background || C.chart.image;
+    // 首个普通谱的背景绘制早于apply_postfx：在这里先建GL，不能缓存未模糊的首帧。
+    if (!C.fx && !C.fx_failed) {
+        try { C.fx = fx_init(); }
+        catch (e) { console.error("背景 WebGL 初始化失败：", e); }
+        if (!C.fx) C.fx_failed = true;
+    }
+    const F = C.fx;
+    const old = game_background_cache;
+    if (old && old.image === image && old.fx === F && old.width === w && old.height === h) return old;
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const bctx = canvas.getContext("2d");
+    const scale = h / image.height * 1.00008 * Math.max(1, (w / h) / (image.width / image.height));
+    bctx.drawImage(image, (w - image.width * scale) / 2, (h - image.height * scale) / 2,
+        image.width * scale, image.height * scale);
+    if (F) {
+        const gl = F.gl;
+        const tex = F.background;
+        fx_bind(gl, 0, tex[0]);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+        // Level.unity source186实际引用SongSelector Blur Config：radius7.1875/iteration4/maxDepth6。
+        // ScalableBlur.Blur：目标依次/2,/4,/8,/16,/8,/4,/2,全尺寸，总计8趟。
+        // ScaleWithResolution @0x32A75FC：短边/1080，钳到[.5,2]，避免大窗口模糊变浅。
+        const radius = 7.1875 * Math.max(0.5, Math.min(2, Math.min(w, h) / 1080));
+        let sw = w, sh = h, current = 0;
+        for (const depth of [1, 2, 3, 4, 3, 2, 1, 0]) {
+            const dw = Math.max(1, w >> depth), dh = Math.max(1, h >> depth);
+            const next = 1 - current;
+            fx_bind(gl, 0, tex[next]);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, dw, dh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            fx_pass(F.prog.backgroundBlur, tex[next], (p, gl) => {
+                fx_bind(gl, 0, tex[current], p.loc.u_tex);
+                gl.uniform2f(p.loc.u_step, radius / (2 * sw), radius / (2 * sh));
+            }, [dw, dh]);
+            current = next; sw = dw; sh = dh;
+        }
+        // 静态背景仅换曲绘/分辨率时回读；正常帧不运行模糊或readPixels。
+        const rgba = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+        const pixels = bctx.createImageData(w, h);
+        for (let y = 0; y < h; y++) pixels.data.set(rgba.subarray(y * w * 4, (y + 1) * w * 4), (h - y - 1) * w * 4);
+        bctx.putImageData(pixels, 0, 0);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        // 中间纹理不必跨帧保留全屏存储。
+        for (const t of tex) {
+            fx_bind(gl, 0, t);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        }
+    }
+    // UI/TranslucentImage：黑色Image、spriteBlending=.5、brightness=.02、vibrancy=1。
+    // 主背景与Cover共用这张静态结果；主背景另叠背景亮度遮罩，Cover不叠。
+    const pixels = bctx.getImageData(0, 0, w, h);
+    for (let i = 0; i < pixels.data.length; i += 4) {
+        for (let c = 0; c < 3; c++) pixels.data[i + c] = Math.min(255, pixels.data[i + c] + 0.02 * 255) * 0.5;
+        pixels.data[i + 3] = 255;
+    }
+    bctx.putImageData(pixels, 0, 0);
+    game_background_cache = { image, fx: F, width: w, height: h, canvas };
+    return game_background_cache;
 };
 
 const cv_put_color = (canvas, color) => {
@@ -970,6 +1023,7 @@ const render_blocks = (sctx, t) => {
      dsgrid.frag           ≈ Hidden/DsGrid（DS 背景网格，加法；真身见 shader_blob_c9）
      composeover.frag      note 层 alpha-over 合回背景层（分层渲染专用） */
 const SHADER_FILES = {
+    backgroundBlur: "backgroundblur.frag",
     fx_vs:       "fx.vert",
     // ES 3.00 版（GlitchDog 要 sampler2DArray，只能在 WebGL2 上跑，
     // 且 ES 1.00/3.00 的 shader 不能混用，所以 vertex 也要配一份）
@@ -1101,6 +1155,7 @@ const fx_init = () => {
     const F = {
         gl, canvas, vbo,
         tex: [mk_tex(), mk_tex()],
+        background: [mk_tex(), mk_tex()],
         // glitch 噪声图：Point + Repeat，对齐 Glitch4in1.png 的导入设置
         noise: mk_tex(true, true),
         /* 方块管线中间 RT 的分辨率与滤波全部照抄原版（HANDOFF §3.1、§7-3）：
@@ -1156,6 +1211,7 @@ const fx_init = () => {
             vignetteNoise: fx_program(gl, SH.vignetteNoise),
             esc: fx_program(gl, SH.esc),
             copy: fx_program(gl, SH.copy),
+            backgroundBlur: fx_program(gl, SH.backgroundBlur),
             bLayers: fx_program(gl, SH.block_layers),
             bCov: fx_program(gl, SH.block_cov),
             bRing: fx_program(gl, SH.block_ring),
@@ -2074,8 +2130,10 @@ const render_scene = (sctx, t, mode) => {
     sctx.globalCompositeOperation = "source-over";
     sctx.clearRect(0, 0, w, h);
     if (mode !== "fg") {
-        sctx.drawImage(C.chart.image, 0, 0, w, h);
-        sctx.fillRectEx(0, 0, w, h, "rgba(0, 0, 0, 0.6)");
+        sctx.drawImage(game_background(w, h).canvas, 0, 0);
+        // GameInformation默认背景亮度=.75，LevelStart动画末尾CanvasGroup.alpha=.7。
+        // LevelInformation.Update把黑色Image.alpha设成1-背景亮度；两者相乘为.175。
+        sctx.fillRectEx(0, 0, w, h, "rgba(0, 0, 0, 0.175)");
     }
     if (mode === "bg") return;   // 背景画布到此为止；前景在另一张画布上画
 
@@ -3021,7 +3079,10 @@ const init_chart = () => {
 //   - 曲绘 URL 不变 -> <img> 直接命中浏览器缓存；
 //   - 音频可以整个复用同一个 <audio> 元素（同一个已解码缓冲），不用重新下载/解码。
 // asset_cache 记住最近一次 asset 目录及其已解码资源；assetDir 相同就直接复用。
-let asset_cache = { dir: null, image: null, music: null };
+let asset_cache = { dir: null, image_url: null, image: null, music: null };
+// 独立于高清曲绘缓存：同歌换难度复用，Happy ending的四个难度则各自取图。
+let background_manifest = {};
+let background_asset_cache = { url: null, image: null };
 
 const music_ended = () => {
     const m = C.chart.music;
@@ -3029,10 +3090,12 @@ const music_ended = () => {
     clock.perf = performance.now();
 };
 
-const load_chart = async (dir, assetDir, anomaly) => {
+const load_chart = async (dir, assetDir, anomaly, imageUrl) => {
     // dir = 谱面目录（chart.json / info.json）；adir = 共享资源目录（曲绘 / 音乐 / postfx）
     const adir = assetDir || dir;
     const reuse = asset_cache.dir === adir;
+    // 曲绘不一致的歌由清单cover指向逐难度图片，音频仍从共享目录读取。
+    const image_url = imageUrl || `${adir}/image.png`;
 
     const progress = { info: 0, chart: 0, image: 0, music: 0 };
     const update = () => {
@@ -3052,24 +3115,37 @@ const load_chart = async (dir, assetDir, anomaly) => {
     const data = await load_json(`${dir}/chart.json`);
     progress.chart = 1; update();
 
-    let image, music;
+    // 将预模糊图计入曲绘进度；二者都就绪后image项才完成。
+    const background_url = background_manifest[dir];
+    const load_background = async () => {
+        if (!background_url) return null;
+        if (background_asset_cache.url === background_url) return background_asset_cache.image;
+        const image = await load_img(background_url);
+        background_asset_cache = { url: background_url, image };
+        return image;
+    };
+    let image, music, background;
     if (reuse) {
-        // 同一首歌换难度：只有曲绘+音乐是共享的重资源，直接复用（不再下载/解码）
-        image = asset_cache.image;
+        // 音频始终复用；曲绘与预模糊图各自按URL判断，不能假设逐难度图片相同。
+        [image, background] = await Promise.all([
+            asset_cache.image_url === image_url ? asset_cache.image : load_img(image_url),
+            load_background()
+        ]);
         music = asset_cache.music;
         progress.image = 1; progress.music = 1; update();
     } else {
-        image = get_blur_img(await load_img(`${adir}/image.png`), 0.05);
+        [image, background] = await Promise.all([load_img(image_url), load_background()]);
         progress.image = 1; update();
 
         music = await load_audioele(`${adir}/${info.music || "music.ogg"}`, (got, tot) => {
             progress.music = tot > 0 ? got / tot : 0;
             update();
         });
-        asset_cache.image = image;
         asset_cache.music = music;
         asset_cache.dir = adir;
     }
+    asset_cache.image = image;
+    asset_cache.image_url = image_url;
 
     // postfx / glitchTex 是**每难度**的（<song>/<DIFF>/postfx.json），不参与共享缓存，
     // 也不跟曲绘音乐一起从 adir 读 —— 读错目录会 404。
@@ -3093,7 +3169,7 @@ const load_chart = async (dir, assetDir, anomaly) => {
         music.addEventListener("ended", music_ended);
     }
 
-    C.chart = { info, data, image, music, postfx, dir, assetDir: adir, blocks: [] };
+    C.chart = { info, data, image, background, music, postfx, dir, assetDir: adir, blocks: [] };
     C.postfx = postfx;
     C.glitch_img = glitch_img;
     C.chart.music = music;
@@ -3168,6 +3244,9 @@ const load_game_hud = async () => {
     await Promise.all([
         load_img(R("/res/hud/pause.png")).then(img => C.game_hud.imgs.pause = img),
         load_img(R("/res/hud/progress.png")).then(img => C.game_hud.imgs.progress = img),
+        Promise.all([load_json(R("/res/hud/glyphs.json")), load_img(R("/res/hud/glyphs.png"))])
+            .then(([metrics, image]) => C.game_hud.font = { metrics, image })
+            .catch(err => console.warn("HUD 字形图集载入失败，使用浏览器字体：", err)),
         font.load().then(face => document.fonts.add(face)).catch(err => {
             console.warn("HUD 字体载入失败，使用备用字体：", err);
         })
@@ -3191,12 +3270,63 @@ const game_hud_layout = (w = cv.width, h = cv.height) => {
         score: { x: right - 237.39 + 200, y: 500 - 445.7 },
         combo: { x: width / 2, y: 500 - 452 },
         combo_text: { x: width / 2, y: 500 - 405 },
-        // 底部两个 Rect 的 pivot 在底边，高46；Middle 对齐的文字中心比 pivot 高23。
+        // 底部两个 Rect 的 pivot 在底边、高46；文本框中心比 pivot 高23。
+        // 字形图集按ascent=.88em计算基线；框中心到基线为(.88-.5)*字号。
         song: { x: left + 40, y: 500 + 473.2 - 23 },
         level: { x: right - 40, y: 500 + 473.2 - 23 },
+        // RawBackground 左右子 Rect 各1000×1000，内边界固定在中心±888.889。
+        cover: { left: width / 2 - 888.8889, right: width / 2 + 888.8889, width: 1000 },
         // ProgressControl.Update @0x1D8600C：pivot=(1,1)，右端 x=a*(2*p-1)、y=500。
         // 精灵本体宽1919、高11，横向平移后由窗口裁切，不按进度拉伸精灵。
         progress: { left, span: 2 * half_width, width: 1919, height: 11 } };
+};
+
+// UI/TranslucentImage：黑色 Image、spriteBlending=.5、vibrancy=1 时，
+// flatten 项为0，最终 RGB = .5 * clamp(blurredBackground + .02, 0, 1)，alpha=1。
+// source 相机只拍摄 Layer8 背景，开场拍摄后停用；侧边不能采样含 note/后期的当前帧。
+const game_cover_image = () => {
+    return game_background(cv.width, cv.height).canvas;
+};
+
+const draw_game_cover = layout => {
+    const cover = layout.cover;
+    if (cover.left <= 0) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(cover.left - cover.width, 0, cover.width, layout.height);
+    ctx.rect(cover.right, 0, cover.width, layout.height);
+    ctx.clip();
+    ctx.drawImage(game_cover_image(), 0, 0, layout.width, layout.height);
+    ctx.restore();
+};
+
+// Unity动态字体先按固定字号生成灰度字形，再随World Space Canvas缩放。
+// 直接fillText会按最终屏幕像素重新hint，导致字高、笔画和字距随分辨率变化。
+const draw_game_text = (value, size, align, x, y, max_width) => {
+    const str = String(value);
+    const font = C.game_hud.font;
+    const table = font && font.metrics.sizes[size];
+    const chars = Array.from(str);
+    if (table && chars.every(char => table[char])) {
+        const width = chars.reduce((sum, char) => sum + table[char].advance, 0);
+        const fit = width > max_width ? max_width / width : 1;
+        const baseline = y + (font.metrics.ascent - 0.5) * size * fit;
+        let pen = x - width * fit * (align === "right" ? 1 : align === "center" ? 0.5 : 0);
+        for (const char of chars) {
+            const g = table[char];
+            if (g.w) ctx.drawImage(font.image, g.x, g.y, g.w, g.h,
+                pen + g.left * fit, baseline + g.top * fit, g.w * fit, g.h * fit);
+            pen += g.advance * fit;
+        }
+        return;
+    }
+    // 外部谱面/新曲名含图集未收录字符时，整行使用原字体，避免缺字或混用基线。
+    ctx.font = `${size}px PhiHUD, sans-serif`;
+    const width = ctx.measureText(str).width;
+    if (width > max_width) ctx.font = `${size * max_width / width}px PhiHUD, sans-serif`;
+    ctx.textAlign = align;
+    ctx.textBaseline = "middle";
+    ctx.fillText(str, x, y);
 };
 
 const draw_game_hud = t_raw => {
@@ -3219,17 +3349,12 @@ const draw_game_hud = t_raw => {
         ctx.drawImage(hud.imgs.progress, bar.left + bar.span * progress - bar.width,
             0, bar.width, bar.height);
     }
+    // Level.unity Canvas 子节点顺序：progress → RawBackground → pause/其余文字。
+    draw_game_cover(layout);
     const button = layout.pause;
     if (hud.imgs.pause) ctx.drawImage(hud.imgs.pause, button.x, button.y, button.width, button.height);
 
-    const text = (value, size, align, x, y, max_width) => {
-        const str = String(value);
-        ctx.font = `${size}px PhiHUD, sans-serif`;
-        const width = ctx.measureText(str).width;
-        if (width > max_width) ctx.font = `${size * max_width / width}px PhiHUD, sans-serif`;
-        ctx.textAlign = align;
-        ctx.fillText(str, x, y);
-    };
+    const text = draw_game_text;
     text(String(Math.round(hud.score)).padStart(7, "0"), 50, "right", layout.score.x, layout.score.y, 400);
     if (hud.combo > 2) {
         text(hud.combo, 70, "center", layout.combo.x, layout.combo.y, 400);
@@ -3237,7 +3362,9 @@ const draw_game_hud = t_raw => {
     }
     const name_width = Math.min(650, Math.max(1, (layout.level.x - layout.song.x - 24) / 2));
     text(C.chart.info.name || "", 36, "left", layout.song.x, layout.song.y, name_width);
-    text(C.chart.info.level || "", 36, "right", layout.level.x, layout.level.y, name_width);
+    // Gameplay 难度只显示整数部分（16.5 → 16），保留谱面库及原始定数。
+    const level = (C.chart.info.level || "").replace(/(\d+)\.\d+/g, "$1");
+    text(level, 36, "right", layout.level.x, layout.level.y, name_width);
     ctx.restore();
 };
 
@@ -3384,7 +3511,7 @@ const select_chart = async e => {
     ui.start_overlay.classList.add("hidden");
     try {
         // anomaly 来自 index.json：这三首 SP 首玩会带 LevelEffects 异象
-        await load_chart(R(e.path), R(e.asset || e.path), e.anomaly);
+        await load_chart(R(e.path), R(e.asset || e.path), e.anomaly, e.cover ? R(e.cover) : undefined);
         chart_started = false;
         ui.start_overlay.classList.remove("hidden");
     } catch (err) {
@@ -3479,6 +3606,9 @@ const init_player = async () => {
     }
 
     ui.loading_text.textContent = "正在加载谱面库…";
+    const backgrounds = await load_json_or_null(R("/res/background/index.json"));
+    background_manifest = Object.fromEntries(Object.entries(backgrounds && backgrounds.charts || {})
+        .map(([path, image]) => [R(path), R(image)]));
     const lib_manifest = await load_json_or_null(R("/res/library/index.json"));
     if (lib_manifest && Array.isArray(lib_manifest.charts) && lib_manifest.charts.length > 0) {
         render_library(lib_manifest.charts);
