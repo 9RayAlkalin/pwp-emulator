@@ -1,4 +1,10 @@
-const C = {
+import type { ChartInfo, LocalChart, RuntimeNote, Settings } from '../types';
+import { Judge } from './judge';
+import './canvas';
+import { linear, find_event, init_speed_events, merge_notes, init_note_fp, get_event_val, get_fp, rotate_point } from './timeline';
+
+// Original rendering state includes optional uniforms for chart-specific effect passes.
+const C: any = {
     note: { tap: 1, drag: 2, hold: 3, flick: 4 },
     units: { pgrw: 0.05625, pgrh: 0.6, pgrbeat: 60 / 32 },
     linew: 0.0075,
@@ -86,36 +92,30 @@ const C = {
     hit_fx_imgs: [],
     // 自动演奏的分数/Combo 由谱面结算时间轴更新；combo >= 3 时显示数字和标签。
     game_hud: { score: 0, combo: 0, imgs: {} },
-    fx_enabled: true,
+    postfx_enabled: true,
     fx_failed: false,
     block_enabled: true
 };
 
-const cv = document.querySelector("#main-canvas");
-const ctx = cv.getContext("2d");
+const cv = document.querySelector<HTMLCanvasElement>("#main-canvas")!;
 const actx = new AudioContext();
+let settings: Settings;
+const judge = new Judge();
+const events = new EventTarget();
+let localUrls: string[] = [];
+let finishSent = false;
 
-const el = id => document.querySelector(id);
-const ui = {
+const el = (id: string): any => document.querySelector(id);
+const ui: any = {
     btn_play: el("#btn-play"),
     progress_wrap: el("#progress-wrap"),
-    progress_fill: el("#progress-fill"),
     progress_marks: el("#progress-marks"),
     time_label: el("#time-label"),
     bottom_bar: el("#bottom-bar"),
-    start_overlay: el("#start-overlay"),
     loading_overlay: el("#loading-overlay"),
     loading_fill: el("#loading-fill"),
     loading_text: el("#loading-text"),
-    btn_library: el("#btn-library"),
-    library_overlay: el("#library-overlay"),
-    library_grid: el("#library-grid"),
-    library_count: el("#library-count"),
-    library_close: el("#library-close"),
-    loading_overlay: el("#loading-overlay"),
     loading_label: el("#loading-label"),
-    loading_fill: el("#loading-fill"),
-    loading_text: el("#loading-text"),
 
     /* 视频导出面板 */
     btn_export: el("#btn-export"),
@@ -147,9 +147,9 @@ const ui = {
 // 同一份代码在根路径和子路径下都能跑，不用为部署维护第二份。
 const BASE = new URL(".", document.baseURI).pathname;
 // 把 "/xxx"（谱面库清单里的 path / asset / cover 就是这个形式）拼到基址后面
-const R = p => BASE + String(p).replace(/^\/+/, "");
+const R = (p: string) => /^(https?:|blob:|data:)/.test(p) ? p : BASE + String(p).replace(/^\/+/, "");
 
-const load_audio = async (url, on_progress) => {
+const load_audio = async (url, on_progress?) => {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`fetch ${url}: ${resp.status}`);
     // 音频要 decodeAudioData，进度按字节比例报（解码耗时算不进进度条，但解码很快）
@@ -173,7 +173,7 @@ const read_with_progress = async (resp, on_progress) => {
         return buf;
     }
     const reader = resp.body.getReader();
-    const chunks = [];
+    const chunks: Uint8Array[] = [];
     let got = 0;
     for (;;) {
         const step = await reader.read();
@@ -192,11 +192,14 @@ const play_sound = buf => {
     if (!buf) return;
     const source = actx.createBufferSource();
     source.buffer = buf;
-    source.connect(actx.destination);
+    const gain = actx.createGain();
+    gain.gain.value = settings?.hitVolume ?? 0.6;
+    source.connect(gain).connect(actx.destination);
+    source.onended = () => { source.disconnect(); gain.disconnect(); };
     source.start();
 };
 
-const load_img = async url => {
+const load_img = async (url: string): Promise<HTMLImageElement> => {
     const img = new Image();
     await new Promise((resolve, reject) => {
         img.onload = resolve;
@@ -227,7 +230,7 @@ const load_json_or_null = async url => {
    WebGL1 没有 sampler2DArray，只绑第 0 层（噪声不演化，其余观感保留）。 */
 const fx_load_wirenoise = async (F, layers) => {
     const gl = F.gl;
-    const imgs = [];
+    const imgs: HTMLImageElement[] = [];
     for (let i = 0; i < layers; i++)
         imgs.push(await load_img(R(`/res/effects/wirenoise_${String(i).padStart(2, "0")}.png`)));
 
@@ -242,7 +245,7 @@ const fx_load_wirenoise = async (F, layers) => {
                       gl.RED, gl.UNSIGNED_BYTE, null);
         const cv = document.createElement("canvas");
         cv.width = w; cv.height = h;
-        const ctx = cv.getContext("2d", { willReadFrequently: true });
+        const ctx = cv.getContext("2d", { willReadFrequently: true })!;
         const r8 = new Uint8Array(w * h);
         for (let i = 0; i < layers.length; i++) {
             ctx.clearRect(0, 0, w, h);
@@ -396,7 +399,7 @@ const clip_img = (img, y0, y1) => {
     const tempcv = document.createElement("canvas");
     tempcv.width = img.width;
     tempcv.height = y1 - y0;
-    const tempctx = tempcv.getContext("2d");
+    const tempctx = tempcv.getContext("2d")!;
     tempctx.drawImage(img, 0, -y0);
     return tempcv;
 };
@@ -405,7 +408,7 @@ const clip_block_img = (img, x0, y0, x1, y1) => {
     const tempcv = document.createElement("canvas");
     tempcv.width = x1 - x0;
     tempcv.height = y1 - y0;
-    const tempctx = tempcv.getContext("2d");
+    const tempctx = tempcv.getContext("2d")!;
     tempctx.drawImage(img, -x0, -y0);
     return tempcv;
 };
@@ -413,11 +416,11 @@ const clip_block_img = (img, x0, y0, x1, y1) => {
 const clip_hold = (img, atlas) => {
     const tail = clip_img(img, 0, atlas[0]);
     const body = clip_img(img, atlas[0], img.height - atlas[1]);
-    const head = clip_img(img, img.height - atlas[1], atlas[1]);
+    const head = clip_img(img, img.height - atlas[1], img.height);
     return [head, body, tail];
 };
 
-const load_audioele = async (url, on_progress) => {
+const load_audioele = async (url, on_progress?): Promise<HTMLAudioElement> => {
     const audio = new Audio();
     audio.preload = "auto";
     audio.src = url;
@@ -435,14 +438,15 @@ const load_audioele = async (url, on_progress) => {
             on_progress(audio.duration, audio.duration);
         });
     }
-    await new Promise((resolve, reject) => {
-        audio.oncanplaythrough = resolve;
-        audio.onerror = reject;
+    await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { cleanup(); reject(new Error(`音乐加载超时：${url}`)); }, 60000);
+        const cleanup = () => { clearTimeout(timer); audio.oncanplaythrough = null; audio.onerror = null; };
+        audio.oncanplaythrough = () => { cleanup(); resolve(); };
+        audio.onerror = () => { cleanup(); reject(new Error(`音乐无法解码或加载：${url}`)); };
+        audio.load();
     });
     return audio;
 };
-
-const linear = (t, st, et, sv, ev) => sv + (t - st) / (et - st) * (ev - sv);
 
 // 事件选取复刻游戏 JudgeLineControl.UpdateJudgeLineEventIndex：索引单调前进到
 // 「第一个 endTime > t 的事件」；t 落在事件间隙里时取的是「间隙之后那条」（再从它的
@@ -450,24 +454,13 @@ const linear = (t, st, et, sv, ev) => sv + (t - st) / (et - st) * (ev - sv);
 // 所以旧版在空隙/首事件之前直接 return -1 是错的 —— get_fp 会因此把 linefp 变成硬编码
 // 的 0，note 位置整片错掉（实测 DS-AT line4 能偏到 -63782）。endTime 在合法谱面里随
 // startTime 单调不减（连续或带间隙都成立），所以可以二分。
-const find_event = (t, es) => {
-    let l = 0, r = es.length - 1;
-    let ans = es.length - 1;   // 没有 endTime > t 的事件 ⇒ 钳到最后一条（游戏的 -1 修正）
-    while (l <= r) {
-        const m = Math.floor((l + r) / 2);
-        if (es[m].endTime > t) { ans = m; r = m - 1; }
-        else l = m + 1;
-    }
-    return ans;
-};
-
 /* easeType -> f(p)。原版 GetEase.GetEaseWithProgress 不是直接算函数，而是把 [0,1] 按 1%
    采样成 101 项查表再线性插值；表由静态初始化生成，指数 n = (type-1)//3 + 2，
    (type-1)%3 决定 In / Out / InOut。13 = Zero（恒 0），14 = One（恒 1），
    15 = AnimationCurve 不在内置表里。枚举名和曲线并不一致（InSine 其实是二次幂，没有正弦）。
    这里照抄这份表，保证逐项和反编译结果一致。 */
 const ease_table = (() => {
-    const tbl = [];
+    const tbl: Float32Array[] = [];
     for (let type = 0; type <= 14; type++) {
         const row = new Float32Array(101);
         if (type >= 1 && type <= 12) {
@@ -498,49 +491,10 @@ const ease = (p, type) => {
     return row[i] + (x - i) * (row[i + 1] - row[i]);
 };
 
-const init_speed_events = es => {
-    let fp = 0.0;
-    for (const e of es) {
-        e.floorPosition = fp;
-        fp += (e.endTime - e.startTime) * e.value;
-    }
-};
-
-const merge_notes = (above, below) => {
-    for (const note of above) note.is_above = true;
-    for (const note of below) note.is_above = false;
-    return [...above, ...below];
-};
-
-const init_note_fp = (notes, ses) => {
-    for (const note of notes) note.floorPosition = get_fp(note.time, ses);
-};
-
-const get_event_val = (t, es, sn, en) => {
-    const i = find_event(t, es);
-    if (i === -1) return 0.0;
-    const e = es[i];
-    return linear(t, e.startTime, e.endTime, e[sn], e[en]);
-};
-
-const get_fp = (t, es) => {
-    const i = find_event(t, es);
-    if (i === -1) return 0.0;
-    const e = es[i];
-    return e.floorPosition + (t - e.startTime) * e.value;
-};
-
-const rotate_point = (x, y, r, deg) => {
-    return [
-        x + r * Math.cos(deg * Math.PI / 180),
-        y + r * Math.sin(deg * Math.PI / 180)
-    ];
-};
-
 // LevelControl.Start 加载 IllustrationBlur（256×135 / 6.25 PPU），不是高清曲绘。
 // BackgroundScaler 的世界大小仍为40.96×21.6、scale=.463，宽屏继续等比放大。
 // LeTai.Asset.TranslucentImage.ScalableBlur 再对屏幕捕获做四对角采样。
-let game_background_cache = null;
+let game_background_cache: { image: any; fx: any; width: number; height: number; canvas: HTMLCanvasElement } | null = null;
 const game_background = (w, h) => {
     const image = C.chart.background || C.chart.image;
     // 首个普通谱的背景绘制早于apply_postfx：在这里先建GL，不能缓存未模糊的首帧。
@@ -554,7 +508,7 @@ const game_background = (w, h) => {
     if (old && old.image === image && old.fx === F && old.width === w && old.height === h) return old;
     const canvas = document.createElement("canvas");
     canvas.width = w; canvas.height = h;
-    const bctx = canvas.getContext("2d");
+    const bctx = canvas.getContext("2d")!;
     const scale = h / image.height * 1.00008 * Math.max(1, (w / h) / (image.width / image.height));
     bctx.drawImage(image, (w - image.width * scale) / 2, (h - image.height * scale) / 2,
         image.width * scale, image.height * scale);
@@ -626,7 +580,7 @@ const cv_put_color = (canvas, color) => {
 const clock = { base: 0, perf: 0, running: false };
 
 const clock_t = () => clock.running
-    ? clock.base + (performance.now() - clock.perf) / 1000
+    ? clock.base + (performance.now() - clock.perf) / 1000 * (settings?.speed ?? 1)
     : clock.base;
 
 const clock_seek = v => { clock.base = v; clock.perf = performance.now(); };
@@ -974,7 +928,7 @@ const render_blocks = (sctx, t) => {
     // 只有在 WebGL 管线真的用不了的时候才退化成纯色方块。
     // 这条路径一旦和 WebGL 同时跑，场景画布上就留了一份没处理的方块，
     // 而 WebGL 那份被位移场抖过、轮廓对不齐，看上去就是「处理过的方块叠在未处理的方块上」。
-    if (any && (!C.fx_enabled || C.fx_failed)) {
+    if (any && C.fx_failed) {
         for (const b of blocks) if (!b.isSubtract) draw_block_flat(sctx, b, t, w, h, false);
         for (const b of blocks) if (b.isSubtract) draw_block_flat(sctx, b, t, w, h, true);
     }
@@ -1053,7 +1007,7 @@ const SHADER_FILES = {
     block_apply: "block_apply.frag"
 };
 
-const SH = {};
+const SH: Record<string, string> = {};
 
 /* 展开 `#include "key"`；成环或找不到都直接抛错，别让 shader 悄悄缺一段。 */
 const shader_expand = (src, seen) => src.replace(
@@ -1086,7 +1040,7 @@ const fx_compile = (gl, type, src) => {
 
    ★ ES 3.00 的 shader 首行必须是 `#version 300 es`，任何东西都不能加在它前面
      （包括 #define），所以有 defines 时只允许用于 ES 1.00 的 shader。 */
-const fx_program = (gl, fs_src, defines, vs_key) => {
+const fx_program = (gl, fs_src, defines?, vs_key?) => {
     if (defines && defines.length) {
         if (/^\s*#version/.test(fs_src))
             throw new Error("ES 3.00 shader 不能注入 #define（#version 必须在首行）");
@@ -1121,7 +1075,7 @@ const fx_init = () => {
         premultipliedAlpha: false, preserveDrawingBuffer: true
     };
     const gl2 = canvas.getContext("webgl2", opts);
-    const gl = gl2 || canvas.getContext("webgl", opts);
+    const gl: any = gl2 || canvas.getContext("webgl", opts);
     if (!gl) return null;
 
     /* 异象 shader 的可选能力探测：
@@ -1136,7 +1090,7 @@ const fx_init = () => {
     const has_deriv = has_texpack || !!gl.getExtension("OES_standard_derivatives");
     const glsl_defs = has_deriv ? ["FX_HAS_DERIV"] : [];
 
-    const mk_tex = (repeat, nearest) => {
+    const mk_tex = (repeat?, nearest?) => {
         const t = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, t);
         const filter = nearest ? gl.NEAREST : gl.LINEAR;
@@ -1237,7 +1191,7 @@ const fx_init = () => {
 };
 
 // 绑贴图 + 把 sampler uniform 指到对应 unit
-const fx_bind = (gl, unit, tex, loc) => {
+const fx_bind = (gl, unit, tex, loc?) => {
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     if (loc) gl.uniform1i(loc, unit);
@@ -1246,7 +1200,7 @@ const fx_bind = (gl, unit, tex, loc) => {
 /* 绑 sampler2DArray（GlitchDog 的 _WireNoiseArray）。
    ★ 不能用 fx_bind：它硬编码 bindTexture(TEXTURE_2D)，而 array 纹理必须绑到
      TEXTURE_2D_ARRAY 目标，否则采样时 INVALID_OPERATION(1282)。 */
-const fx_bind_array = (gl, unit, tex, loc) => {
+const fx_bind_array = (gl, unit, tex, loc?) => {
     gl.activeTexture(gl.TEXTURE0 + unit);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     if (loc) gl.uniform1i(loc, unit);
@@ -1255,7 +1209,7 @@ const fx_bind_array = (gl, unit, tex, loc) => {
 /* vp = 该 pass 要写的 RT 尺寸（不传就是全屏 F.w×F.h）。
    原版每个 pass 的 Blit 目标 RT 尺寸各不相同（/8 compose、/4 effectRT、/6 sceneColor），
    gl.viewport 必须跟着目标走，否则只会写到目标的左下角一块。 */
-const fx_pass = (prog, dst_tex, setup, vp) => {
+const fx_pass = (prog, dst_tex, setup?, vp?) => {
     const gl = C.fx.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, dst_tex ? C.fx.fbo : null);
     if (dst_tex) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dst_tex, 0);
@@ -1514,7 +1468,7 @@ const fx_pass_dimslash = (F, cur, eff, t) => {
     const order = Object.keys(sl).sort();
     for (const name of order) {
         const infos = sl[name] || [];
-        let geo = null;
+        let geo: { pos?: { x: number; y: number }; lineDir?: number; slashDir?: number } | null = null;
         for (const inf of infos) if (inf.time <= t) geo = inf; else break;
         const strength = eff_ev(eff, name + "Strength", t);
         if (!geo || strength <= 0) continue;
@@ -1858,10 +1812,10 @@ const fx_render_anomaly = (F, cur, eff, t) => {
 const fx_render = (src_canvas, t, bg_canvas) => {
     const F = C.fx;
     const gl = F.gl;
-    const pf = C.postfx;
+    const pf = C.postfx_enabled ? C.postfx : null;
     const K = pf ? pf.curves : null;
 
-    const eff = C.fx_eff;
+    const eff = C.postfx_enabled ? C.fx_eff : null;
     /* 分层模式（F5 后：异象 **或** 带方块的谱）：bg_canvas=只有曲绘的背景画布，
        src_canvas=判定线+note 层。背景层先入 tex[0] 走 disabled/黑幕/kaleido/网格，
        再把 note 层 alpha-over 合回来 —— disabled 因此回到 note/线之下
@@ -2041,7 +1995,8 @@ const apply_postfx = (src, dst, t, bg) => {
         dctx.drawImage(src, 0, 0);
     };
 
-    if (!C.fx_enabled || C.fx_failed) {
+    // Blocks are scene content. Their WebGL materials remain active when post-processing is disabled.
+    if (C.fx_failed || (!C.postfx_enabled && !C.chart.blocks?.length)) {
         flat();
         return;
     }
@@ -2114,16 +2069,20 @@ const resize_canvases = (w, h) => {
 const resize_to_window = () => {
     // 导出期间画布是导出分辨率，窗口 onresize 不许把它覆盖掉
     if (C.video_export_active) return;
-    resize_canvases(window.innerWidth, window.innerHeight);
+    // Canvas dimensions are HTML attributes; no stylesheet or inline styles are needed.
+    const fullscreen = document.fullscreenElement === document.getElementById('stage');
+    const width = fullscreen ? window.innerWidth : Math.max(1, Math.min(960, document.documentElement.clientWidth - 16));
+    const height = fullscreen ? window.innerHeight : Math.round(width * 9 / 16);
+    if (cv.width !== width || cv.height !== height) resize_canvases(width, height);
 };
 
 /* ---------------- 主渲染 ---------------- */
 
 /* mode: undefined=整帧（普通谱）| "bg"=只画曲绘（异象分层的背景画布）|
    "fg"=只画判定线/note/打击特效+方块 mask（透明底）。 */
-const render_scene = (sctx, t, mode) => {
+const render_scene = (sctx, t, mode?) => {
     const [w, h] = [cv.width, cv.height];
-    const note_width = w * 0.1234375;
+    const note_width = w * 0.1234375 * (settings?.noteScale ?? 1);
 
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.globalAlpha = 1;
@@ -2133,7 +2092,7 @@ const render_scene = (sctx, t, mode) => {
         sctx.drawImage(game_background(w, h).canvas, 0, 0);
         // GameInformation默认背景亮度=.75，LevelStart动画末尾CanvasGroup.alpha=.7。
         // LevelInformation.Update把黑色Image.alpha设成1-背景亮度；两者相乘为.175。
-        sctx.fillRectEx(0, 0, w, h, "rgba(0, 0, 0, 0.175)");
+        sctx.fillRectEx(0, 0, w, h, `rgba(0, 0, 0, ${1 - (settings?.brightness ?? 0.65)})`);
     }
     if (mode === "bg") return;   // 背景画布到此为止；前景在另一张画布上画
 
@@ -2150,14 +2109,16 @@ const render_scene = (sctx, t, mode) => {
         const linefp = get_fp(beatt, line.speedEvents);
 
         for (const note of line.notes) {
-            if (note.sect < t && !note.clicked) {
+            if ((settings.autoplay || C.video_export_active) && note.sect < t && !note.clicked) {
                 // 视频导出时不发声：导出比实时快，实时播放的打击音必然错位
                 // （导出的音轨只有音乐，见「视频导出」一节），clicked 标记照置。
-                if (!C.video_export_active) play_sound(C.click_sounds[note.type]);
+                if (!C.video_export_active && clock.running) play_sound(C.click_sounds[note.type]);
                 note.clicked = true;
             }
 
-            if ((!note.is_hold && note.sect < t) || (note.is_hold && note.hold_end_time < t)) {
+            const result = judge.results.get(note);
+            if ((!settings.autoplay && !C.video_export_active && result && (!note.is_hold || result.grade === 'miss')) ||
+                (!note.is_hold && note.sect + (settings.autoplay ? 0 : 0.16) < t) || (note.is_hold && note.hold_end_time < t)) {
                 continue;
             }
 
@@ -2180,7 +2141,7 @@ const render_scene = (sctx, t, mode) => {
             if (!note.is_hold && note_fp < -1e6) continue;
             if (note_fp > h * 2) continue;
 
-            const draw_head = note.sect > t;
+            const draw_head = !note.clicked && (note.sect > t || !settings.autoplay);
             const note_head_img = C.note_head_imgs[note.type][note.morebets];
             const this_note_width = note_width * (note.morebets ? (
                 C.note_head_imgs[note.type][1].width
@@ -2260,6 +2221,7 @@ const render_scene = (sctx, t, mode) => {
     for (const [note, effect_t] of C.chart.data.click_effect_collection) {
         if (effect_t > t) break;
         if (effect_t + effect_dur < t) continue;
+        if (!settings.autoplay && !C.video_export_active) continue;
 
         const p = (t - effect_t) / effect_dur;
         const imi = Math.max(0, Math.min(C.hit_fx_imgs.length - 1, Math.floor(p * C.hit_fx_imgs.length)));
@@ -2287,15 +2249,22 @@ const render_scene = (sctx, t, mode) => {
         }
     }
 
-    render_blocks(sctx, t);
+    if (!settings.autoplay && !C.video_export_active) {
+        judge.draw(sctx, t, w, h);
+    }
 };
 
 /* 渲染「某一时刻」的一帧。时间轴 = get_time() 域（秒，即音乐秒），内部再减谱面 offset。
    实时播放（render）与视频导出（export_video）都走这一条路径 —— 导出画面 == 播放画面。 */
 const render_frame_at = (t_raw) => {
     if (!cv.width || !cv.height) return;
-    const t = t_raw - C.chart.data.offset;
-    update_game_score(t);
+    const t = t_raw - C.chart.data.offset + (settings.offset / 1000);
+    if (settings.autoplay || C.video_export_active) update_game_score(t);
+    else {
+        if (clock.running) judge.update(t);
+        C.game_hud.score = judge.stats.score;
+        C.game_hud.combo = judge.stats.combo;
+    }
     /* 异象分层：黑幕/kaleido/网格在原版挂在 SortingLayer=Background 的
        effect Canvas 上（画在判定线/note 之下），所以场景拆成
        「背景（曲绘）」与「判定线+note」两张画布分别进 GL。 */
@@ -2303,15 +2272,18 @@ const render_frame_at = (t_raw) => {
        否则非 split 路径会把 disabled 方块烘进含 note/判定线的整帧
        （原版 BackCanvas B/2 在判定线/note 之下）。无方块谱仍整帧。 */
     const has_blocks = !!(C.chart.blocks && C.chart.blocks.length);
-    const split = !!((C.fx_eff || has_blocks) && C.fx && C.fx_enabled && !C.fx_failed);
+    const split = !!(((C.postfx_enabled && C.fx_eff) || has_blocks) && C.fx && !C.fx_failed);
     if (split) {
         render_scene(C.bg_cv.getContext("2d"), t, "bg");
         render_scene(C.scene_cv.getContext("2d"), t, "fg");
     } else {
         render_scene(C.scene_cv.getContext("2d"), t);
     }
+    // HUD belongs to the foreground scene, so active Block materials sample and cover it too.
+    const foreground = C.scene_cv.getContext('2d');
+    draw_game_hud(foreground, t_raw);
+    render_blocks(foreground, t);
     apply_postfx(C.scene_cv, cv, t, split ? C.bg_cv : null);
-    draw_game_hud(t_raw);
 };
 
 const render = () => {
@@ -2322,40 +2294,18 @@ const render = () => {
         if (!C.video_export_active) {
             const t_raw = get_time();
             render_frame_at(t_raw);
-            update_progress(t_raw - C.chart.data.offset);
+            update_progress(t_raw);
+            events.dispatchEvent(new CustomEvent('frame', { detail: simulator.snapshot() }));
+            if (clock.running && t_raw >= C.chart.duration && !finishSent) {
+                finishSent = true;
+                pause();
+                events.dispatchEvent(new CustomEvent('finish', { detail: simulator.snapshot() }));
+            }
         }
     } catch (e) {
         console.error("渲染帧出错（已跳过该帧）：", e);
     }
     requestAnimationFrame(render);
-};
-
-CanvasRenderingContext2D.prototype.drawLine = function (x0, y0, x1, y1, w, c) {
-    this.save();
-    this.beginPath();
-    this.moveTo(x0, y0);
-    this.lineTo(x1, y1);
-    this.lineWidth = w;
-    this.strokeStyle = c;
-    this.stroke();
-    this.restore();
-};
-
-CanvasRenderingContext2D.prototype.fillRectEx = function (x, y, w, h, c) {
-    this.save();
-    this.beginPath();
-    this.rect(x, y, w, h);
-    this.fillStyle = c;
-    this.fill();
-    this.restore();
-};
-
-CanvasRenderingContext2D.prototype.drawCenterRotateImage = function (img, x, y, w, h, deg) {
-    this.save();
-    this.translate(x, y);
-    this.rotate(deg * Math.PI / 180);
-    this.drawImage(img, -w / 2, -h / 2, w, h);
-    this.restore();
 };
 
 /* ---------------- 视频导出 ----------------
@@ -2409,7 +2359,7 @@ const WEBM_ID = {
 
 /* 拼接若干 Uint8Array（可嵌套数组 / 跳过 null），一次性分配 */
 const cat_bytes = (...arrs) => {
-    const flat = [];
+    const flat: Uint8Array[] = [];
     const push = a => {
         if (a == null) return;
         if (a instanceof Uint8Array) { flat.push(a); return; }
@@ -2441,7 +2391,7 @@ const wb_vint = v => {
 };
 
 const wb_uint = n => {
-    const out = [];
+    const out: number[] = [];
     let x = Math.max(0, Math.floor(n));
     do { out.unshift(x & 0xff); x = Math.floor(x / 256); } while (x > 0);
     return Uint8Array.from(out);
@@ -2465,9 +2415,9 @@ const wb_el = (id, ...payload) => {
    frame_ns = 视频帧时长（ns），写进 TrackEntry/DefaultDuration —— 没有它
    ffprobe/播放器推不出帧率（实测 r_frame_rate 会变成 1000/1 这种怪值）。 */
 const webm_writer = ({ width, height, video_codec, frame_ns, audio, duration_ms }) => {
-    const clusters = [];
-    const cues = [];            // { t: 关键帧 ms, cluster: 簇下标（簇未封口时 = clusters.length） }
-    let cur = null;
+    const clusters: Uint8Array<ArrayBuffer>[] = [];
+    const cues: { t: number; cluster: number }[] = [];
+    let cur: { ts: number; blocks: Uint8Array<ArrayBuffer>[]; size: number } | null = null;
 
     const new_cluster = ts => { cur = { ts, blocks: [], size: 0 }; };
     const seal_cluster = () => {
@@ -2478,22 +2428,22 @@ const webm_writer = ({ width, height, video_codec, frame_ns, audio, duration_ms 
     };
     const add_block = (track, ts_ms, key, data) => {
         if (!cur) new_cluster(ts_ms);
-        const span = ts_ms - cur.ts;
-        if (span > 4000 || cur.size > (4 << 20) || (track === 1 && key && cur.blocks.length && span > 0)) {
+        const span = ts_ms - cur!.ts;
+        if (span > 4000 || cur!.size > (4 << 20) || (track === 1 && key && cur!.blocks.length && span > 0)) {
             seal_cluster();
             new_cluster(ts_ms);
         }
         const head = new Uint8Array(4);
         head[0] = 0x80 | track;                                   // 轨道号 vint（1/2 均单字节）
-        new DataView(head.buffer).setInt16(1, ts_ms - cur.ts);
+        new DataView(head.buffer).setInt16(1, ts_ms - cur!.ts);
         head[3] = key ? 0x80 : 0;
         // ★ SimpleBlock = A3 + 尺寸 + [轨道号][int16 相对时间][flags][数据]。
         //   第一版漏了 wb_el 这层包装，把裸 payload 塞进簇 —— 文件结构自洽（尺寸都对），
         //   ffmpeg 也能认出轨道/时长，但一个 Block 都解不出来
         //   （_analysis\ebml_check.py 与 ffprobe 的 “0x00 at pos …” 警告就是这来的）。
         const blk = wb_el(WEBM_ID.simple_block, head, data);
-        cur.blocks.push(blk);
-        cur.size += blk.length;
+        cur!.blocks.push(blk);
+        cur!.size += blk.length;
         if (track === 1 && key) cues.push({ t: ts_ms, cluster: clusters.length });
     };
     const chunk_bytes = chunk => {
@@ -2574,14 +2524,14 @@ const webm_writer = ({ width, height, video_codec, frame_ns, audio, duration_ms 
 
 /* ---- 导出驱动 ---- */
 
-const video_export = {
+const video_export: { blob: Blob | null; name: string; done: number; total: number; status: string; error: unknown; perf0: number } = {
     blob: null, name: "", done: 0, total: 0, status: "", error: null, perf0: 0
 };
 
 /* 让出主线程一拍。不能用 setTimeout：后台标签页里被节流到 ≥1s，
    导出会退化成 1 帧/秒。MessageChannel 不受节流，而且必须是宏任务级让步 ——
    await 一个已 resolve 的 promise 只清微任务队列，浏览器/工具消息永远进不来。 */
-const yield_tick = () => new Promise(resolve => {
+const yield_tick = () => new Promise<void>(resolve => {
     const mc = new MessageChannel();
     mc.port1.onmessage = () => { mc.port1.close(); resolve(); };
     mc.port2.postMessage(0);
@@ -2591,7 +2541,7 @@ const yield_tick = () => new Promise(resolve => {
    队列不积压，这个函数此前会直接返回 —— 整个导出循环变成一条微任务长链，
    主线程被焊死（本轮实测：连 1+1 的评估都进不来）。另外顺带兜底：
    编码器出错/被取消时别在这里空转。 */
-const wait_encoder = async (enc, abort_check) => {
+const wait_encoder = async (enc, abort_check?) => {
     do {
         if (abort_check) abort_check();
         await yield_tick();
@@ -2651,12 +2601,13 @@ const opus_head_fallback = channels => {
 };
 
 const encode_audio_48k = async rendered => {
-    const chunks = [];
-    const out = { desc: null, error: null, channels: rendered.numberOfChannels };
+    const chunks: EncodedAudioChunk[] = [];
+    const out: { desc: Uint8Array | null; error: unknown; channels: number } = { desc: null, error: null, channels: rendered.numberOfChannels };
     const enc = new AudioEncoder({
         output: (chunk, meta) => {
             const d = meta && meta.decoderConfig && meta.decoderConfig.description;
-            if (d && !out.desc) out.desc = new Uint8Array(d);
+            if (d && !out.desc) out.desc = ArrayBuffer.isView(d)
+                ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength).slice() : new Uint8Array(d).slice();
             chunks.push(chunk);
         },
         error: e => { out.error = e; }
@@ -2666,7 +2617,7 @@ const encode_audio_48k = async rendered => {
         numberOfChannels: out.channels, bitrate: 128000
     });
     const FRAME = 960;                               // 20ms @48k
-    const planes = [];
+    const planes: Float32Array[] = [];
     for (let c = 0; c < out.channels; c++) planes.push(rendered.getChannelData(c));
     let n_chunk = 0;
     for (let pos = 0; pos < rendered.length; pos += FRAME) {
@@ -2693,7 +2644,7 @@ const encode_audio_48k = async rendered => {
     return { chunks, desc: out.desc, error: out.error, channels: out.channels };
 };
 
-const export_video = async (opt = {}) => {
+const export_video = async (opt: { fps?: number; width?: number; height?: number; start?: number; end?: number; bitrate?: number; audio?: boolean } = {}) => {
     if (C.video_export_active) throw new Error("已有导出任务在跑");
     if (!C.chart || !C.chart.data || !C.chart.data.judgeLineList) throw new Error("尚未载入谱面");
     if (!window.VideoEncoder) throw new Error("此浏览器不支持 WebCodecs（VideoEncoder）");
@@ -2708,13 +2659,15 @@ const export_video = async (opt = {}) => {
     if (!(end > start)) end = Math.max(dur, start + 1);
     end = Math.min(end, Math.max(dur, start) + 10);          // 尾部最多多渲 10s
     const total = Math.max(1, Math.ceil((end - start) * fps));
-    const mbps = opt.bitrate > 0 ? +opt.bitrate
+    const mbps = (opt.bitrate || 0) > 0 ? +opt.bitrate!
                                  : Math.max(1, w * h * fps * 0.08 / 1e6);
     const bitrate = Math.round(mbps * 1e6);
     const want_audio = !!opt.audio;
 
     const was_playing = clock.running || !!(m && !m.paused && !m.ended);
     const prev_pos = clock_t();
+    const clickedBeforeExport = new Map<RuntimeNote, boolean>(C.chart.data.judgeLineList
+        .flatMap(line => line.notes).map(note => [note, note.clicked]));
 
     C.video_export_active = true;
     video_export.blob = null; video_export.error = null;
@@ -2722,7 +2675,7 @@ const export_video = async (opt = {}) => {
     video_export.status = "准备中…";
     video_export.perf0 = 0;
 
-    let venc = null;
+    let venc: VideoEncoder | null = null;
     try {
         if (m) pause();
         preclick_notes(start);
@@ -2735,8 +2688,8 @@ const export_video = async (opt = {}) => {
         render_frame_at(start);          // 预热：RT 按新尺寸重建、贴图上传（不计进度）
 
         // ---- 音频轨：先离线渲完、编码完（几秒钟的活），chunks 攒着等视频同步入封装 ----
-        const aq = [];
-        let audio_meta = null;
+        const aq: EncodedAudioChunk[] = [];
+        let audio_meta: { channels: number; codec_private: Uint8Array; codec_delay_ns: number } | null = null;
         if (want_audio && m && typeof AudioEncoder === "function") {
             try {
                 video_export.status = "渲染音频…";
@@ -2766,7 +2719,7 @@ const export_video = async (opt = {}) => {
         // ---- 视频轨编码器：VP9 优先，退 VP8 ----
         video_export.status = "探测编码器…";
         export_ui_progress(true);
-        let vcodec = null;
+        let vcodec: string | null = null;
         for (const c of ["vp09.00.10.08", "vp8"]) {
             try {
                 const s = await VideoEncoder.isConfigSupported({
@@ -2785,8 +2738,8 @@ const export_video = async (opt = {}) => {
             duration_ms: (end - start) * 1000      // 先写进 Info：播放器看时长靠它
         });
 
-        const vq = [];
-        let venc_err = null;
+        const vq: EncodedVideoChunk[] = [];
+        let venc_err: unknown = null;
         /* 按时间戳归并两轨再入封装，保证同一簇内块的时间单调
            （音轨在视频之前整段就绪，只是在这里被拉平节奏） */
         const pump = () => {
@@ -2847,7 +2800,7 @@ const export_video = async (opt = {}) => {
         C.video_export_cancelled = false;
         resize_to_window();
         clock_seek(prev_pos);
-        preclick_notes(prev_pos);
+        for (const [note, clicked] of clickedBeforeExport) note.clicked = clicked;
         update_progress(prev_pos);
         // 立刻按窗口尺寸重画一帧（后台标签页 rAF 可能被挂起，不能等它）
         try { render_frame_at(clock_t()); } catch (e) {}
@@ -2861,13 +2814,13 @@ const export_video = async (opt = {}) => {
 let export_ui_last = 0;
 const fmt_hms = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
-const export_ui_progress = force => {
+const export_ui_progress = (force = false) => {
     const now = performance.now();
     if (!force && now - export_ui_last < 120) return;    // 别每帧都摸 DOM
     export_ui_last = now;
     const ve = video_export;
     const pct = ve.total ? ve.done / ve.total : 0;
-    ui.export_progress_fill.style.width = `${(pct * 100).toFixed(2)}%`;
+    ui.export_progress_fill.value = pct * 100;
     let txt = ve.status || "";
     if (ve.done && ve.perf0) {
         const sec = (now - ve.perf0) / 1000;
@@ -2882,7 +2835,7 @@ const export_ui_progress = force => {
     ui.export_status.textContent = txt;
 };
 
-const export_open = () => !ui.export_overlay.classList.contains("hidden");
+const export_open = () => ui.export_overlay.open;
 
 const auto_bitrate = (w, h, fps) => Math.max(1, Math.round(w * h * fps * 0.08 / 1e6));
 
@@ -2911,22 +2864,20 @@ const open_export_panel = () => {
     if (export_open() || C.video_export_active || lib_loading) return;
     if (!C.chart || !C.chart.data) return;
     pause();
-    ui.start_overlay.classList.add("hidden");
     ui.export_end.value = (C.chart.duration || 0).toFixed(2);
     ui.export_bitrate.value = auto_bitrate(
         parseInt(ui.export_w.value, 10) || 1920,
         parseInt(ui.export_h.value, 10) || 1080,
         parseInt(ui.export_fps.value, 10) || 60);
-    ui.export_progress_wrap.classList.add("hidden");
+    ui.export_progress_wrap.hidden = true;
     ui.export_status.textContent = "";
     export_est_update();
-    ui.export_overlay.classList.remove("hidden");
+    ui.export_overlay.showModal();
 };
 
 const close_export_panel = () => {
     if (!export_open() || C.video_export_active) return;
-    ui.export_overlay.classList.add("hidden");
-    if (!chart_started) ui.start_overlay.classList.remove("hidden");
+    ui.export_overlay.close();
 };
 
 const export_cancel = () => {
@@ -2939,7 +2890,7 @@ const export_run_ui = async () => {
     if (C.video_export_active) return;
     ui.export_go.disabled = true;
     ui.export_cancel.disabled = false;
-    ui.export_progress_wrap.classList.remove("hidden");
+    ui.export_progress_wrap.hidden = false;
     ui.export_status.textContent = "准备中…";
     try {
         const blob = await export_video(export_collect_opt());
@@ -3079,10 +3030,10 @@ const init_chart = () => {
 //   - 曲绘 URL 不变 -> <img> 直接命中浏览器缓存；
 //   - 音频可以整个复用同一个 <audio> 元素（同一个已解码缓冲），不用重新下载/解码。
 // asset_cache 记住最近一次 asset 目录及其已解码资源；assetDir 相同就直接复用。
-let asset_cache = { dir: null, image_url: null, image: null, music: null };
+let asset_cache: { dir: string | null; image_url: string | null; image: HTMLImageElement | null; music: HTMLAudioElement | null } = { dir: null, image_url: null, image: null, music: null };
 // 独立于高清曲绘缓存：同歌换难度复用，Happy ending的四个难度则各自取图。
 let background_manifest = {};
-let background_asset_cache = { url: null, image: null };
+let background_asset_cache: { url: string | null; image: HTMLImageElement | null } = { url: null, image: null };
 
 const music_ended = () => {
     const m = C.chart.music;
@@ -3090,7 +3041,7 @@ const music_ended = () => {
     clock.perf = performance.now();
 };
 
-const load_chart = async (dir, assetDir, anomaly, imageUrl) => {
+const load_chart = async (dir, assetDir?, anomaly?, imageUrl?) => {
     // dir = 谱面目录（chart.json / info.json）；adir = 共享资源目录（曲绘 / 音乐 / postfx）
     const adir = assetDir || dir;
     const reuse = asset_cache.dir === adir;
@@ -3102,10 +3053,10 @@ const load_chart = async (dir, assetDir, anomaly, imageUrl) => {
         const keys = ["info", "chart", "image", "music"];
         const sum = keys.reduce((a, k) => a + progress[k], 0);
         const pct = sum / keys.length;
-        ui.loading_fill.style.width = `${Math.min(100, pct * 100)}%`;
+        ui.loading_fill.value = Math.min(100, pct * 100);
         ui.loading_text.textContent = `${Math.round(pct * 100)}%`;
     };
-    ui.loading_overlay.classList.remove("hidden");
+    ui.loading_overlay.hidden = false;
     ui.loading_label.textContent = "正在加载谱面";
     update();
 
@@ -3162,7 +3113,7 @@ const load_chart = async (dir, assetDir, anomaly, imageUrl) => {
         // 复用同一个 <audio> 要归零；换歌时是新元素，同样归零
         music.pause();
         try { music.currentTime = 0; } catch (e) { /* 尚未 ready 时忽略 */ }
-        music.style.display = "none";
+        music.hidden = true;
         if (!music.isConnected) document.body.appendChild(music);
         // 固定 handler + 先摘后挂，切难度时不会重复注册
         music.removeEventListener("ended", music_ended);
@@ -3179,6 +3130,7 @@ const load_chart = async (dir, assetDir, anomaly, imageUrl) => {
        每帧都会抛 "line.get_state is not a function"（切异象谱时实测刷了一串）。
        init_chart 不引用 fx/fx_eff，fx_load_anomaly 不引用 C.chart —— 顺序可安全互换。 */
     init_chart();
+    reset_judge();
 
     /* 首玩异象：清掉上一首的，再按需载入。异象与 s6 那套 postfx 互斥
        （fx_render 里优先走 eff 分支）。anomaly 来自 index.json 的条目，
@@ -3194,8 +3146,8 @@ const load_chart = async (dir, assetDir, anomaly, imageUrl) => {
     }
 
     clock_run(false);
-    ui.btn_play.textContent = ">";
-    ui.loading_overlay.classList.add("hidden");
+    ui.btn_play.textContent = "开始";
+    ui.loading_overlay.hidden = true;
 };
 
 /* ---------------- 自动演奏计分 ----------------
@@ -3206,7 +3158,7 @@ const load_chart = async (dir, assetDir, anomaly, imageUrl) => {
    使用排序后的结算时间二分查找，结果仅由当前谱面时间决定：倒退、跳转、重复绘制和
    非零起点的视频导出都不依赖 clicked 或此前渲染过多少帧。 */
 const init_game_score = () => {
-    const times = [];
+    const times: number[] = [];
     for (const line of C.chart.data.judgeLineList) {
         for (const note of line.notes) {
             times.push(note.is_hold ? Math.max(note.sect, note.hold_end_time - 0.22) : note.sect);
@@ -3285,10 +3237,10 @@ const game_hud_layout = (w = cv.width, h = cv.height) => {
 // flatten 项为0，最终 RGB = .5 * clamp(blurredBackground + .02, 0, 1)，alpha=1。
 // source 相机只拍摄 Layer8 背景，开场拍摄后停用；侧边不能采样含 note/后期的当前帧。
 const game_cover_image = () => {
-    return game_background(cv.width, cv.height).canvas;
+    return game_background(cv.width, cv.height)!.canvas;
 };
 
-const draw_game_cover = layout => {
+const draw_game_cover = (ctx: CanvasRenderingContext2D, layout) => {
     const cover = layout.cover;
     if (cover.left <= 0) return;
     ctx.save();
@@ -3302,7 +3254,7 @@ const draw_game_cover = layout => {
 
 // Unity动态字体先按固定字号生成灰度字形，再随World Space Canvas缩放。
 // 直接fillText会按最终屏幕像素重新hint，导致字高、笔画和字距随分辨率变化。
-const draw_game_text = (value, size, align, x, y, max_width) => {
+const draw_game_text = (ctx: CanvasRenderingContext2D, value, size, align: CanvasTextAlign, x, y, max_width) => {
     const str = String(value);
     const font = C.game_hud.font;
     const table = font && font.metrics.sizes[size];
@@ -3329,8 +3281,8 @@ const draw_game_text = (value, size, align, x, y, max_width) => {
     ctx.fillText(str, x, y);
 };
 
-const draw_game_hud = t_raw => {
-    if (!chart_started || lib_loading || library_open()) return;
+const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number) => {
+    if (!chart_started || lib_loading) return;
     const hud = C.game_hud;
     const layout = game_hud_layout();
     ctx.save();
@@ -3350,11 +3302,11 @@ const draw_game_hud = t_raw => {
             0, bar.width, bar.height);
     }
     // Level.unity Canvas 子节点顺序：progress → RawBackground → pause/其余文字。
-    draw_game_cover(layout);
+    draw_game_cover(ctx, layout);
     const button = layout.pause;
     if (hud.imgs.pause) ctx.drawImage(hud.imgs.pause, button.x, button.y, button.width, button.height);
 
-    const text = draw_game_text;
+    const text = (value, size, align: CanvasTextAlign, x, y, max_width) => draw_game_text(ctx, value, size, align, x, y, max_width);
     text(String(Math.round(hud.score)).padStart(7, "0"), 50, "right", layout.score.x, layout.score.y, 400);
     if (hud.combo > 2) {
         text(hud.combo, 70, "center", layout.combo.x, layout.combo.y, 400);
@@ -3375,13 +3327,13 @@ const fmt_time = v => {
 
 const update_progress = t => {
     const dur = C.chart.duration || 1;
-    ui.progress_fill.style.width = `${Math.max(0, Math.min(1, t / dur)) * 100}%`;
+    ui.progress_wrap.value = Math.max(0, Math.min(1, t / dur)) * 100;
     ui.time_label.textContent = `${fmt_time(t)} / ${fmt_time(dur)}`;
 };
 
 const draw_progress_marks = () => {
     const dur = C.chart.duration || 1;
-    const times = [];
+    const times: number[] = [];
     for (const b of C.chart.blocks) {
         times.push(b.appearTime);
         times.push(b.disappearTime);
@@ -3393,22 +3345,34 @@ const draw_progress_marks = () => {
     const uniq = [...new Set(times)].sort((a, b) => a - b);
     ui.progress_marks.innerHTML = "";
     for (const v of uniq) {
-        const i = document.createElement("i");
-        i.style.left = `${Math.max(0, Math.min(1, v / dur)) * 100}%`;
+        const i = document.createElement("option");
+        i.value = String(Math.max(0, Math.min(1, v / dur)) * 100);
         ui.progress_marks.appendChild(i);
     }
 };
 
 const play = () => {
+    if (!C.chart.music || lib_loading || C.video_export_active) return;
+    if (clock_t() >= C.chart.duration) seek(0);
+    if (settings.fullscreen && !document.fullscreenElement) {
+        const stage = document.getElementById('stage')!;
+        if (stage.requestFullscreen) void stage.requestFullscreen().catch(() => {});
+    }
     const m = C.chart.music;
     const t = clock_t();
+    void actx.resume();
+    m.playbackRate = settings.speed;
+    m.volume = settings.volume;
     if (t < m.duration) {
         m.currentTime = Math.max(0, t);
-        m.play().catch(() => {});
+        m.play().catch(error => {
+            pause();
+            events.dispatchEvent(new CustomEvent('error', { detail: `无法播放音乐：${error.message}` }));
+        });
     }
     clock_seek(t);
     clock_run(true);
-    ui.btn_play.textContent = "||";
+    ui.btn_play.textContent = "暂停";
 };
 
 const pause = () => {
@@ -3417,10 +3381,12 @@ const pause = () => {
     C.chart.music.pause();
     clock_run(false);
     clock_seek(t);
-    ui.btn_play.textContent = ">";
+    judge.clearInput();
+    ui.btn_play.textContent = "开始";
 };
 
 const toggle_play = () => {
+    if (!C.chart.music || lib_loading || C.video_export_active) return;
     if (clock.running || !C.chart.music.paused) pause();
     else play();
 };
@@ -3431,94 +3397,26 @@ const seek = v => {
     if (!m.paused && !m.ended) m.currentTime = Math.min(v, m.duration);
     clock_seek(v);
     // 跳过的 note 视为已自动命中，避免跳转后补播全部历史打击音。
-    preclick_notes(v);
+    reset_judge(v - C.chart.data.offset + settings.offset / 1000);
+    if (settings.autoplay) preclick_notes(v);
+    finishSent = false;
     update_game_score(v - C.chart.data.offset);
     update_progress(v);
 };
 
 /* ---------------- 底栏显隐 ---------------- */
-// 底栏默认隐藏（index.html 的 #bottom-bar 初始就带 hidden），B 键切换：
-// 播放时底栏会压住画面下沿，隐藏后更接近原版观感；要看进度/换谱时按 B 调出来。
-const toggle_bottom_bar = () => ui.bottom_bar.classList.toggle("hidden");
+// Native playback controls below the canvas can be toggled with B.
+const toggle_bottom_bar = () => { ui.bottom_bar.hidden = !ui.bottom_bar.hidden; };
 
 /* ---------------- 谱面库 ---------------- */
 let chart_started = false;
 let render_started = false;
 let lib_loading = false;
 
-const library_open = () => !ui.library_overlay.classList.contains("hidden");
-
 const open_library = () => {
-    if (library_open() || lib_loading) return;
-    pause();
-    ui.start_overlay.classList.add("hidden");
-    ui.library_close.disabled = !C.chart.data;
-    ui.library_overlay.classList.remove("hidden");
-};
-
-const close_library = () => {
-    // 首次启动还没有选谱，此时不能关闭到空白画面或显示无谱面的开始按钮。
-    if (!library_open() || !C.chart.data) return;
-    ui.library_overlay.classList.add("hidden");
-    if (!chart_started) ui.start_overlay.classList.remove("hidden");
-};
-
-const render_library = list => {
-    ui.library_count.textContent = `${list.length} charts`;
-    ui.library_grid.textContent = "";
-    for (const e of list) {
-        const card = document.createElement("div");
-        card.className = "lib-card";
-
-        const img = document.createElement("img");
-        img.className = "lib-cover";
-        img.loading = "lazy";
-        // 同一首歌各难度曲绘共用同一个 URL -> 浏览器只下载一次，多张卡片共用缓存
-        img.src = R(e.cover || `${e.path}/image.png`);
-
-        const body = document.createElement("div");
-        body.className = "lib-body";
-
-        const name = document.createElement("div");
-        name.className = "lib-name";
-        name.textContent = e.name;
-
-        const sub = document.createElement("div");
-        sub.className = "lib-sub";
-        sub.textContent = e.composer || e.song || "";
-
-        const row = document.createElement("div");
-        row.className = "lib-row";
-        const diff = document.createElement("span");
-        diff.className = `lib-diff d-${e.difficulty}`;
-        diff.textContent = e.difficulty;
-        const level = document.createElement("span");
-        level.className = "lib-level";
-        level.textContent = e.level;
-        row.append(diff, level);
-
-        body.append(name, sub, row);
-        card.append(img, body);
-        card.onclick = () => select_chart(e);
-        ui.library_grid.appendChild(card);
-    }
-};
-
-const select_chart = async e => {
     if (lib_loading) return;
-    lib_loading = true;
-    ui.library_overlay.classList.add("hidden");
-    ui.start_overlay.classList.add("hidden");
-    try {
-        // anomaly 来自 index.json：这三首 SP 首玩会带 LevelEffects 异象
-        await load_chart(R(e.path), R(e.asset || e.path), e.anomaly, e.cover ? R(e.cover) : undefined);
-        chart_started = false;
-        ui.start_overlay.classList.remove("hidden");
-    } catch (err) {
-        console.error("谱面载入失败：", e.path, err);
-        ui.start_overlay.classList.remove("hidden");
-    }
-    lib_loading = false;
+    pause();
+    events.dispatchEvent(new Event('library'));
 };
 
 const init_player = async () => {
@@ -3528,19 +3426,19 @@ const init_player = async () => {
     C.block_sub_cv = document.createElement("canvas");
 
     resize_to_window();
-    window.onresize = resize_to_window;
+    window.addEventListener('resize', resize_to_window);
     document.addEventListener("fullscreenchange", resize_to_window);
     document.addEventListener("webkitfullscreenchange", resize_to_window);
 
     // 首次访问外网时资源可能很慢：立即显示启动进度，独立资源并行下载。
     // 每项最多等待60秒，失败时保留具体错误，避免所有浮层隐藏后的无提示黑屏。
     let boot_done = 0, boot_failed = false;
-    const tasks = [
+    const tasks: [string, () => Promise<unknown>][] = [
         ["res/click.ogg", async () => C.click_sounds[C.note.tap] = await load_audio(R("/res/click.ogg"))],
         ["res/drag.ogg", async () => C.click_sounds[C.note.drag] = await load_audio(R("/res/drag.ogg"))],
         ["res/flick.ogg", async () => C.click_sounds[C.note.flick] = await load_audio(R("/res/flick.ogg"))],
         ...["click", "drag", "hold", "flick", "click_mh", "drag_mh", "hold_mh", "flick_mh"].map(key =>
-            [`res/${key}.png`, async () => C.note_imgs[key] = await load_img(R(`/res/${key}.png`))]),
+            [`res/${key}.png`, async () => C.note_imgs[key] = await load_img(R(`/res/${key}.png`))] as [string, () => Promise<unknown>]),
         ["res/respack.json", async () => C.respack_info = await load_json(R("/res/respack.json"))],
         ["res/hit_fx.png", async () => C.hit_fx = await load_img(R("/res/hit_fx.png"))],
         ["res/BlockNoise1.png", async () => C.block.imgs.displace = await load_img(R("/res/BlockNoise1.png"))],
@@ -3551,7 +3449,7 @@ const init_player = async () => {
     const pending = new Set(tasks.map(([name]) => name));
     const boot_progress = () => {
         if (boot_failed) return;
-        ui.loading_fill.style.width = `${boot_done / tasks.length * 100}%`;
+        ui.loading_fill.value = boot_done / tasks.length * 100;
         ui.loading_text.textContent = `${boot_done}/${tasks.length} · 等待 ${[...pending].join("、")}`;
     };
     boot_progress();
@@ -3608,46 +3506,15 @@ const init_player = async () => {
     ui.loading_text.textContent = "正在加载谱面库…";
     const backgrounds = await load_json_or_null(R("/res/background/index.json"));
     background_manifest = Object.fromEntries(Object.entries(backgrounds && backgrounds.charts || {})
-        .map(([path, image]) => [R(path), R(image)]));
-    const lib_manifest = await load_json_or_null(R("/res/library/index.json"));
-    if (lib_manifest && Array.isArray(lib_manifest.charts) && lib_manifest.charts.length > 0) {
-        render_library(lib_manifest.charts);
-        open_library();
-        // 所有设备启动后都停留在谱面库，用户选谱后才加载歌曲并显示 Click to start。
-        ui.loading_overlay.classList.add("hidden");
-    } else {
-        await load_chart(R("/res/s6"));
-        ui.library_count.textContent = "未导入：py import_library.py";
-        ui.start_overlay.classList.remove("hidden");
-    }
-
-    ui.start_overlay.onclick = () => {
-        // 在用户点击/按空格的同步调用中请求整页全屏，保留底栏与谱面库等浮层。
-        // 不等待全屏结果：浏览器不支持或拒绝时仍按原流程开始播放。
-        if (!document.fullscreenElement && !document.webkitFullscreenElement) {
-            const root = document.documentElement;
-            const request = root.requestFullscreen || root.webkitRequestFullscreen;
-            if (request) {
-                try {
-                    const result = request.call(root);
-                    if (result && result.catch) result.catch(() => {});
-                } catch (e) { /* 全屏不可用时继续窗口播放 */ }
-            }
-        }
-        ui.start_overlay.classList.add("hidden");
-        chart_started = true;
-        play();
-        if (!render_started) {
-            render_started = true;
-            render();
-        }
-    };
+        .filter(([, image]) => typeof image === 'string')
+        .map(([path, image]) => [R(path), R(String(image))]));
+    ui.loading_overlay.hidden = true;
 
     ui.btn_play.onclick = toggle_play;
 
     // HUD 暂停图标复用播放器的播放/暂停操作；暂停菜单留待后续移植。
     cv.addEventListener("click", e => {
-        if (!chart_started || lib_loading || library_open() || export_open() || C.video_export_active) return;
+        if (!chart_started || lib_loading || export_open() || C.video_export_active) return;
         const rect = cv.getBoundingClientRect();
         const layout = game_hud_layout();
         const x = (e.clientX - rect.left) * cv.width / rect.width / layout.scale;
@@ -3657,15 +3524,14 @@ const init_player = async () => {
             y >= button.y - 12 && y <= button.y + button.height + 12) toggle_play();
     });
 
-    ui.btn_library.onclick = open_library;
-    ui.library_close.onclick = close_library;
-    ui.library_overlay.onclick = e => {
-        if (e.target === ui.library_overlay) close_library();
-    };
-
     /* 导出视频面板 */
     ui.btn_export.onclick = open_export_panel;
     ui.export_close.onclick = close_export_panel;
+    ui.export_overlay.addEventListener('cancel', e => {
+        e.preventDefault();
+        if (C.video_export_active) export_cancel();
+        else close_export_panel();
+    });
     ui.export_overlay.onclick = e => {
         if (e.target === ui.export_overlay) close_export_panel();
     };
@@ -3693,12 +3559,13 @@ const init_player = async () => {
     ui.export_go.onclick = export_run_ui;
     ui.export_cancel.onclick = export_cancel;
 
-    ui.progress_wrap.onclick = e => {
-        const r = ui.progress_wrap.getBoundingClientRect();
-        seek((e.clientX - r.left) / r.width * C.chart.duration);
+    ui.progress_wrap.oninput = () => {
+        if (C.chart.data && !C.video_export_active) seek(Number(ui.progress_wrap.value) / 100 * C.chart.duration);
     };
 
-    window.onkeydown = e => {
+    window.addEventListener('keydown', e => {
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
+        if (!C.chart.data) return;
         if (C.video_export_active) {
             if (e.code === "Escape") { e.preventDefault(); export_cancel(); }
             return;                      // 导出期间锁输入：空格/方向键别去碰播放时钟
@@ -3710,18 +3577,10 @@ const init_player = async () => {
             }
             return;
         }
-        if (library_open()) {
-            if (e.code === "Space" || e.code === "Escape") {
-                e.preventDefault();
-                close_library();
-            }
-            return;
-        }
         if (lib_loading) return;
         if (e.code === "Space") {
             e.preventDefault();
-            if (ui.start_overlay.classList.contains("hidden")) toggle_play();
-            else ui.start_overlay.onclick();
+            toggle_play();
         } else if (e.code === "ArrowLeft") {
             seek(get_time() - 2);
         } else if (e.code === "ArrowRight") {
@@ -3733,15 +3592,97 @@ const init_player = async () => {
         } else if (e.code === "KeyB") {
             toggle_bottom_bar();
         }
-    };
-
-    console.log(C);
+    });
 };
 
-window.onload = () => init_player().catch(err => {
-    console.error("播放器启动失败：", err);
-    ui.start_overlay.classList.add("hidden");
-    ui.loading_overlay.classList.remove("hidden");
-    ui.loading_label.textContent = "启动失败";
-    ui.loading_text.textContent = `${err.message || err}（请检查网络后刷新页面）`;
-});
+function reset_judge(time = -Infinity) {
+    const notes: RuntimeNote[] = C.chart.data.judgeLineList.flatMap(line => line.notes);
+    judge.reset(notes, time);
+    finishSent = false;
+}
+
+export const simulator = {
+    events,
+    canvas: cv,
+    async init(initialSettings: Settings) {
+        settings = initialSettings;
+        judge.onHit = note => play_sound(C.click_sounds[note.type]);
+        await init_player();
+    },
+    async load(entry: { path: string; asset?: string; cover?: string; anomaly?: string }) {
+        pause();
+        lib_loading = true;
+        try {
+            await load_chart(R(entry.path), R(entry.asset || entry.path), entry.anomaly, entry.cover ? R(entry.cover) : undefined);
+            this.ready();
+        } finally { lib_loading = false; ui.loading_overlay.hidden = true; }
+    },
+    async loadLocal(chart: LocalChart) {
+        pause();
+        lib_loading = true;
+        const urls: string[] = [];
+        const url = (blob: Blob) => { const value = URL.createObjectURL(blob); urls.push(value); return value; };
+        try {
+            const music = await load_audioele(url(chart.music));
+            const image = await load_img(chart.image ? url(chart.image) : R('/res/s6/image.png'));
+            C.chart.music?.pause();
+            C.chart.music?.remove();
+            localUrls.forEach(value => URL.revokeObjectURL(value));
+            localUrls = urls;
+            C.chart = { info: chart.info, data: structuredClone(chart.data), music, image, background: null,
+                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id };
+            C.postfx = chart.postfx || null;
+            C.glitch_img = null;
+            C.fx_eff = null;
+            game_background_cache = null;
+            init_chart();
+            reset_judge();
+            this.ready();
+        } catch (error) { urls.forEach(value => URL.revokeObjectURL(value)); throw error; }
+        finally { lib_loading = false; }
+    },
+    ready() {
+        chart_started = true;
+        finishSent = false;
+        ui.btn_play.textContent = "开始";
+        resize_to_window();
+        if (!render_started) { render_started = true; render(); }
+        events.dispatchEvent(new CustomEvent('loaded', { detail: this.snapshot() }));
+    },
+    configure(value: Settings) {
+        if (C.video_export_active) return;
+        const t = get_time();
+        const modeChanged = settings.autoplay !== value.autoplay;
+        settings = { ...value };
+        clock_seek(t);
+        if (C.chart.music) { C.chart.music.playbackRate = settings.speed; C.chart.music.volume = settings.volume; }
+        C.postfx_enabled = settings.effects;
+        if (modeChanged && C.chart.data) seek(0);
+    },
+    updateInfo(patch: Partial<ChartInfo>): boolean {
+        if (!C.chart.data || lib_loading || C.video_export_active) return false;
+        C.chart.info = { ...C.chart.info, ...patch };
+        return true;
+    },
+    snapshot() {
+        return {
+            loaded: !!C.chart.data, playing: clock.running, time: get_time(), duration: C.chart.duration || 0,
+            info: C.chart.info, exporting: !!C.video_export_active,
+            stats: settings.autoplay ? {
+                ...judge.stats, perfect: C.chart.scoring?.perfect || 0, good: 0, bad: 0, miss: 0,
+                score: C.game_hud.score, combo: C.game_hud.combo, maxCombo: C.game_hud.combo,
+                accuracy: 100, total: C.chart.scoring?.total || 0,
+            } : { ...judge.stats },
+        };
+    },
+    play() { play(); },
+    pause,
+    seek(value: number) { if (C.chart.data && !C.video_export_active) seek(value); },
+    restart() { if (C.chart.data && !C.video_export_active) { seek(0); this.play(); } },
+    hit(id: string, x: number, y: number, kind: 'tap' | 'move' | 'release', keyboard = false) {
+        if (!clock.running || settings.autoplay || C.video_export_active || lib_loading || export_open()) return;
+        judge.input(id, x, y, kind, get_time() - C.chart.data.offset + settings.offset / 1000, cv.width, cv.height, keyboard);
+    },
+    clearInput() { judge.clearInput(); },
+    exportVideo() { if (C.chart.data) open_export_panel(); },
+};
