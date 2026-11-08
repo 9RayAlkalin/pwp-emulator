@@ -58,6 +58,9 @@
         <p><label>打击音量 <input data-setting="hitVolume" type="range" min="0" max="1" step="0.01"><output></output></label></p>
         <p><label>背景亮度 <input data-setting="brightness" type="range" min="0" max="1" step="0.01"><output></output></label></p>
         <p><label>音符大小 <input data-setting="noteScale" type="range" min="0.5" max="1.5" step="0.05"><output></output></label></p>
+        <p><label>谱面宽高比（宽 ÷ 高）<input data-setting="chartAspectRatio" type="number" min="0" max="4" step="any" list="chart-aspect-presets" value="0"></label>
+            <small>0 跟随谱面；例如 1.5 为 3:2，1.7777777777777777 为 16:9。仅对 PEC / RPE 生效，立即应用并保存。</small></p>
+        <datalist id="chart-aspect-presets"><option value="0">跟随谱面</option><option value="1.3333333333333333">4:3</option><option value="1.5">3:2</option><option value="1.7777777777777777">16:9</option><option value="2.3333333333333335">21:9</option></datalist>
         <p><label>判定偏移 (ms) <input data-setting="offset" type="number" min="-500" max="500" step="1"></label> <small>正值提前判定</small></p>
         <p><label><input data-setting="apFcIndicator" type="checkbox">FC/AP 指示器</label> <label><input data-setting="effects" type="checkbox">后期与异象特效</label> <label><input data-setting="fullscreen" type="checkbox">开始时全屏</label></p>
     </details>

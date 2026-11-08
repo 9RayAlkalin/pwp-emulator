@@ -16,6 +16,8 @@ pnpm dev
 - 原生控件单页界面，使用原生选谱下拉框、Autoplay 复选框、搜索和折叠设置；始终提供内置 True Home, True World 演示。
 - 通过文件选择或拖放导入 PEZ / ZIP，或同时选择谱面、音频与可选曲绘。支持 Phigros v1/v3 JSON、PEC 和 RPE，按内容识别格式；支持变 BPM、分离 XY、分层事件、缓动、父子线、假音符及基本文字/颜色/缩放事件。适配范围见 [谱面导入说明](docs/chart-adapters.md)。
 - 支持 `info.yml` / `info.yaml`、`info.txt`、`info.csv`、`info.json`，以及 RPE `META`；`info.txt` 支持 `Name`、`Song`、`Picture`、`Chart`、`Level`、`Composer`、`Charter`、`Illustrator`。一首音乐可供多张谱面共享，多首音乐时需要明确填写对应关系。
+- RPE 自定义判定线图片/GIF、纹理与文字锚点、`gifEvents` 进度，以及七种 `attachUI` HUD 绑定；移动、旋转和缩放后的暂停按钮保留对应点击区域。GIF 逐帧解码需要支持 ImageDecoder 的浏览器。
+- 设置中可调整 PEC/RPE 谱面宽高比（0 跟随 info.yml），即时生效并保存；HUD 保持原尺寸，左右定位在 cover 内侧。
 - Autoplay 与手动 Tap / Drag / Hold / Flick 判定，多点触控、鼠标、键盘输入，分数、连击、准确率与结算；手动、Autoplay 和视频导出共用打击序列帧与粒子，Perfect 金色、Good 蓝色。
 - 手动触摸生效方块会锁定该手指至松开，并触发触摸光晕和音乐低通；支持移动/旋转方块、减算区域及多指，暂停与跳转会清理状态。规则与还原范围见 [Block 接触说明](docs/block-touch.md)。
 - 0.5–2 倍速、时间轴跳转、重开、偏移、音量、音符大小、背景亮度、全屏与特效开关。设置保存在浏览器；导入谱面只保留在当前页面会话。

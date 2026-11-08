@@ -17,7 +17,7 @@ const rpe = (lines: unknown[] = [{ eventLayers: [{ moveXEvents: [e(0)], moveYEve
 function runtime(note: ChartNote, line: ChartLine): RuntimeNote {
   return { ...note, sect: note.time, secht: note.holdTime, hold_end_time: note.time + note.holdTime,
     is_hold: note.type === 3, is_above: true, clicked: false,
-    master: { bpm: line.bpm, get_state: time => createLineStateResolver([line])(line, time) } };
+    master: { bpm: line.bpm, animation: line.animation, get_state: time => createLineStateResolver([line])(line, time) } };
 }
 
 describe('PEC adapter', () => {
@@ -84,7 +84,7 @@ describe('RPE adapter', () => {
     const chart = parseChart(rpe([root, child, { father: 1, rotateWithFather: true, eventLayers: [] }]));
     const state = createLineStateResolver(chart.judgeLineList);
     const c = state(chart.judgeLineList[1], 1);
-    expect(c[0]).toBe(5); expect(c[1]).toBeCloseTo(.6); expect(c[2]).toBeCloseTo(.65);
+    expect(c[0]).toBe(5); expect(c[1]).toBeCloseTo(.6); expect(c[2]).toBeCloseTo(.5 + .1 * 16 / 9);
     expect(state(chart.judgeLineList[2], 1).slice(0, 3)).toEqual(c.slice(0, 3));
   });
   it('evaluates all easing endpoints, easing crops, Bezier inversion, and extended line appearance', () => {
@@ -109,6 +109,19 @@ describe('RPE adapter', () => {
     expect(() => parseChart(rpe([{ bpmfactor: 0 }]))).toThrow('bpmfactor');
     expect(() => parseChart(rpe([{ father: 1 }, { father: 0 }]))).toThrow('循环');
   });
+  it('keeps custom textures, anchors and UI bindings, with GIF events active only during their original intervals', () => {
+    const chart = parseChart(rpe([{ Texture: 'images/anim.gif', anchor: [0, 1], attachUI: 'score',
+      extended: { gifEvents: [e(0, 1, 1, 3)] } },
+    { Texture: 'missing.png', extended: { textEvents: [{ ...e(0), start: 'text', end: 'text' }] } }]));
+    const line = chart.judgeLineList[0];
+    expect(line.animation).toMatchObject({ texture: 'images/anim.gif', anchor: [0, 1], attachUI: 'score' });
+    expect(chart.judgeLineList[1].animation?.texture).toBeUndefined();
+    expect(lineAppearance(line, .1).gifProgress).toBeUndefined();
+    expect(lineAppearance(line, 1).gifProgress).toBeCloseTo(.5);
+    expect(lineAppearance(line, 2.1).gifProgress).toBeUndefined();
+    expect(chart.warnings).toEqual([]);
+    expect(() => parseChart(rpe([{ anchor: [1] }]))).toThrow('anchor');
+  });
   it('retains fake notes visually while excluding them from judgement, score and feedback', () => {
     const chart = parseChart(rpe([{ eventLayers: [], notes: [
       { type: 1, startTime: b(1), isFake: 1, visibleTime: .2 },
@@ -123,5 +136,19 @@ describe('RPE adapter', () => {
     expect(autoplayHoldTimes(hold).length).toBeGreaterThan(1);
     judge.update(10); expect(judge.stats.miss).toBe(1);
     expect(judge.hitEffects).toHaveLength(0);
+  });
+  it('removes adapted Hold tails at the true end without a quarter-second residual sprite', () => {
+    const line = parseChart(rpe([{ notes: [{ type: 2, startTime: b(1), endTime: b(4) }] }])).judgeLineList[0];
+    const hold = runtime(line.notesAbove[0], line);
+    expect(hold.hold_end_time).toBe(3);
+    expect(noteIsVisible(hold, undefined, 2.999, true)).toBe(true);
+    for (const t of [3, 3.05, 3.24]) {
+      expect(noteIsVisible(hold, undefined, t, true)).toBe(false);
+      expect(noteIsVisible(hold, { grade: 'perfect' }, t, false)).toBe(false);
+      expect(noteIsVisible({ ...hold, isFake: true }, undefined, t, false)).toBe(false);
+    }
+    const pecLine = parseChart('175 bp 0 120 cv 0 0 7 n2 0 2 4 0 1 0').judgeLineList[0];
+    const pecHold = runtime(pecLine.notesAbove[0], pecLine);
+    expect(noteIsVisible(pecHold, undefined, 2.01, true)).toBe(false);
   });
 });

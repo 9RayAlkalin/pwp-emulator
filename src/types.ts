@@ -1,5 +1,7 @@
 export type NoteType = 1 | 2 | 3 | 4;
 export type Grade = 'perfect' | 'good' | 'bad' | 'miss';
+export const hudElements = ['pause', 'combonumber', 'combo', 'score', 'bar', 'name', 'level'] as const;
+export type HudElement = typeof hudElements[number];
 export interface ChartEvent {
   startTime: number;
   endTime: number;
@@ -33,6 +35,10 @@ export interface LineAnimation {
   scaleY?: ChartEvent[];
   color?: ChartEvent[][];
   text?: { startTime: number; endTime: number; start: string; end: string; easing?: ChartEasing }[];
+  texture?: string;
+  anchor?: [number, number];
+  gif?: ChartEvent[];
+  attachUI?: HudElement;
   father?: number;
   rotateWithFather?: boolean;
   cover: boolean;
@@ -69,6 +75,7 @@ export interface ChartData {
   judgeLineList: ChartLine[];
   sourceFormat?: 'phigros' | 'pec' | 'rpe';
   warnings?: string[];
+  aspectRatio?: number;
   [key: string]: unknown;
 }
 export interface ChartInfo {
@@ -98,6 +105,7 @@ export interface LocalChart {
   music: Blob;
   image?: Blob;
   postfx?: unknown;
+  textures?: Record<string, Blob>;
 }
 export interface RuntimeNote extends ChartNote {
   sect: number;
@@ -107,7 +115,7 @@ export interface RuntimeNote extends ChartNote {
   is_above: boolean;
   clicked: boolean;
   effectId?: number;
-  master: { bpm?: number; get_state(time: number): number[] };
+  master: { bpm?: number; animation?: LineAnimation; get_viewport?(): { width: number; gameplayScale: number }; get_state(time: number): number[] };
 }
 export interface Statistics {
   perfect: number;
@@ -128,6 +136,7 @@ export interface Settings {
   hitVolume: number;
   brightness: number;
   noteScale: number;
+  chartAspectRatio: number;
   effects: boolean;
   apFcIndicator: boolean;
   fullscreen: boolean;

@@ -1,4 +1,5 @@
 import type { ChartData, ChartEasing, ChartEvent, ChartNote, NoteType } from '../../types';
+import { hudElements } from '../../types';
 import { array, beat, combineSpeeds, compileTrack, emptyLine, finite, record, TempoMap, type BeatEvent } from './common';
 
 const noteTypes: NoteType[] = [1, 1, 3, 4, 2];
@@ -48,6 +49,19 @@ export function parseRpe(value: unknown): ChartData {
     if (ext.scaleXEvents?.length) l.animation.scaleX = compile(ext.scaleXEvents, 1);
     if (ext.scaleYEvents?.length) l.animation.scaleY = compile(ext.scaleYEvents, 1);
     if (ext.colorEvents?.length) l.animation.color = [0, 1, 2].map(channel => compile(ext.colorEvents, 255, 1, channel));
+    const anchor = s.anchor === undefined ? [.5, .5] : array(s.anchor, 'RPE anchor');
+    if (anchor.length !== 2) throw new Error('RPE anchor 必须包含两个数值');
+    l.animation.anchor = [finite(anchor[0], 'RPE anchor X'), finite(anchor[1], 'RPE anchor Y')];
+    if (s.Texture != null && typeof s.Texture !== 'string') throw new Error('RPE Texture 必须为文件路径');
+    if (s.Texture && s.Texture.replaceAll('\\', '/').toLowerCase() !== 'line.png' && !ext.textEvents?.length) l.animation.texture = s.Texture;
+    if (s.attachUI != null && s.attachUI !== '') {
+      if (hudElements.includes(s.attachUI)) l.animation.attachUI = s.attachUI;
+      else warnings.add(`未知 RPE attachUI：${s.attachUI}`);
+    }
+    if (ext.gifEvents?.length && l.animation.texture) {
+      // Only the event intervals control progress. Gaps use time-based looping.
+      l.animation.gif = events(ext.gifEvents).flatMap(e => compileTrack([e], tempo, 0, factor).filter(track => track.easing));
+    }
     if (ext.textEvents?.length) {
       l.animation.text = array(ext.textEvents, 'RPE textEvents').flatMap(value => {
         const e = record(value, 'RPE 文字事件');
@@ -79,14 +93,11 @@ export function parseRpe(value: unknown): ChartData {
       if (n.hitsound) warnings.add('自定义打击音尚未播放，使用默认音效');
       if ([n.tint, n.color, n.tintHitEffects].some(c => c && (!Array.isArray(c) || c.some(v => v !== 255)))) warnings.add('音符及打击特效自定义染色尚未渲染');
     }
-    if (s.Texture && s.Texture !== 'line.png' && !l.animation.text) warnings.add('自定义判定线纹理/GIF 尚未渲染，使用默认判定线');
-    if (s.attachUI) warnings.add('RPE attachUI 尚未绑定游戏界面');
-    if (s.anchor && (!Array.isArray(s.anchor) || s.anchor[0] !== .5 || s.anchor[1] !== .5)) warnings.add('RPE 自定义纹理/文字锚点尚未应用');
     for (const [field, key, neutral] of [['alphaControl', 'alpha', 1], ['sizeControl', 'size', 1], ['posControl', 'pos', 1], ['yControl', 'y', 1], ['skewControl', 'skew', 0]] as const) {
       if (array(s[field], `RPE ${field}`).some(c => c[key] !== neutral)) warnings.add('RPE 距离控制器尚未渲染');
     }
     if (array(ext.inclineEvents, 'RPE inclineEvents').some(e => e.start !== 0 || e.end !== 0)) warnings.add('RPE 判定线倾斜尚未渲染');
-    if (ext.paintEvents?.length || ext.gifEvents?.length) warnings.add('RPE 画笔/GIF 事件尚未渲染');
+    if (ext.paintEvents?.length) warnings.add('RPE 画笔事件尚未渲染');
     if (array(ext.textEvents, 'RPE textEvents').some(e => e.font && e.font !== 'cmdysj')) warnings.add('RPE 自定义字体使用浏览器默认字体替代');
     return l;
   });

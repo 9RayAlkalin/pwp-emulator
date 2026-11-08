@@ -84,7 +84,7 @@ export async function importFiles(files: File[], progress: (text: string) => voi
     } else assets.push({ name: normalizePath(file.webkitRelativePath || file.name), blob: file, group: 0 });
   }
   const audio = assets.filter(asset => /\.(ogg|mp3|wav|m4a|flac)$/i.test(asset.name));
-  const images = assets.filter(asset => /\.(png|jpe?g|webp)$/i.test(asset.name));
+  const images = assets.filter(asset => /\.(png|jpe?g|webp|gif|bmp)$/i.test(asset.name));
   const metadata: { fields: MetadataFields; dir: string; group: number; priority: number }[] = [];
   const parsed = new Map<Asset, unknown>(), texts = new Map<Asset, string>();
   for (const asset of assets.filter(asset => /(?:^|\/)info\.(?:csv|json|txt|ya?ml)$/i.test(asset.name))) {
@@ -143,10 +143,16 @@ export async function importFiles(files: File[], progress: (text: string) => voi
       if (!Number.isFinite(Number(declaredOffset))) throw new Error(`${filename(name)}：元数据 offset 必须为秒数`);
       data.offset += Number(declaredOffset);
     }
-    function choose(list: Asset[], requested?: string, defaults: string[] = []): Asset | undefined {
+    const aspectRatio = field('aspectratio');
+    if (aspectRatio !== undefined) {
+      const value = Number(aspectRatio);
+      if (!Number.isFinite(value) || value <= 0) throw new Error(`${filename(name)}：aspectRatio 必须为正数`);
+      data.aspectRatio = value;
+    }
+    function choose(list: Asset[], requested?: string, defaults: string[] = [], metadataRelative = true): Asset | undefined {
       list = list.filter(value => value.group === asset.group);
       if (requested) {
-        const descriptor = rows.find(row => row.fields.music === requested || row.fields.image === requested);
+        const descriptor = metadataRelative ? rows.find(row => row.fields.music === requested || row.fields.image === requested) : undefined;
         for (const path of [descriptor?.dir !== undefined ? descriptor.dir + requested : dir + requested, dir + requested, requested]) {
           const matches = list.filter(value => key(value.name) === key(path));
           if (matches.length === 1) return matches[0];
@@ -164,15 +170,23 @@ export async function importFiles(files: File[], progress: (text: string) => voi
       if (list.length === 1) return list[0];
       return undefined;
     }
+    const textures: Record<string, Blob> = {};
+    for (const line of data.judgeLineList) {
+      const texture = line.animation?.texture;
+      if (texture && !textures[texture]) textures[texture] = choose(images, texture, [], false)!.blob;
+    }
     const music = choose(audio, field('music') || meta?.song);
     if (!music) throw new Error(`${filename(name)} 无法匹配音乐；请一并选择音乐，或在 info.yml / info.txt / info.csv / info.json 中填写谱面与音乐路径`);
-    const image = choose(images, field('image') || meta?.background, ['image.png', 'background.png']);
+    const textureBlobs = new Set(Object.values(textures));
+    const image = choose(field('image') || meta?.background ? images : images.filter(value => !textureBlobs.has(value.blob)),
+      field('image') || meta?.background, ['image.png', 'background.png']);
     charts.push({
       id: `local:${crypto.randomUUID()}`, data, music: music.blob, image: image?.blob,
       info: { name: field('name') || meta?.name || filename(name).replace(/\.[^.]+$/i, ''), level: field('level') || meta?.level || '自制谱',
         composer: field('composer') || meta?.composer, charter: field('charter') || meta?.charter,
         illustrator: field('illustrator') || meta?.illustration },
       postfx: parsed.get(assets.find(value => value.group === asset.group && key(value.name) === key(`${dir}postfx.json`))!),
+      textures,
     });
   }
   if (!charts.length) throw new Error('未找到谱面；支持 Phigros v1/v3、PEC、RPE，以及 PEZ/ZIP 谱面包');

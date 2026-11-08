@@ -4,6 +4,7 @@ import { avatarId } from './core/profile-assets';
 export const defaults: Settings = {
   autoplay: true, speed: 1, offset: 0, volume: 0.7, hitVolume: 0.6,
   brightness: 0.65, noteScale: 1, effects: true, apFcIndicator: true, fullscreen: false,
+  chartAspectRatio: 0,
   playerName: '9RayAlkalin', playerId: '00000000', playerAvatar: 'OblivionPHIN', playerRks: 16.08, playerChallengeModeRank: 48,
   playerChallengeModeTier: 3, playerShowName: true,
   skipLoadingAnimation: false,
@@ -20,6 +21,7 @@ export function loadSettings(): Settings {
     result.offset = Math.min(500, Math.max(-500, result.offset));
     for (const key of ['volume', 'hitVolume', 'brightness'] as const) result[key] = Math.min(1, Math.max(0, result[key]));
     result.noteScale = Math.min(1.5, Math.max(0.5, result.noteScale));
+    result.chartAspectRatio = Math.min(4, Math.max(0, result.chartAspectRatio));
     result.playerName = result.playerName.trim().slice(0, 20) || defaults.playerName;
     result.playerId = result.playerId.replace(/\D/g, '').slice(0, 12).padStart(8, '0');
     result.playerRks = Math.min(20, Math.max(0, result.playerRks));

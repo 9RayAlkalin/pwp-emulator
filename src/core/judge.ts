@@ -57,7 +57,7 @@ export class Judge {
   private position(note: RuntimeNote, time: number): [number, number, number] {
     const [rotation, x, y] = note.master.get_state(time);
     const angle = rotation * Math.PI / 180;
-    const distance = note.positionX * 0.05625 * this.width;
+    const distance = note.positionX * 0.05625 * (note.master.get_viewport?.().width ?? this.width);
     return [x * this.width + distance * Math.cos(angle), y * this.height + distance * Math.sin(angle), angle];
   }
   private near(note: RuntimeNote, contact: Contact, time: number): boolean {
@@ -66,7 +66,8 @@ export class Judge {
     const [x, y, angle] = this.position(note, time);
     // Judge along the line; a rotating line uses its local X axis.
     const radius = note.type === 2 || note.type === 4 ? 0.21 : 0.19;
-    return Math.abs((contact.x - x) * Math.cos(angle) + (contact.y - y) * Math.sin(angle)) < this.height * radius * (note.judgeArea ?? 1);
+    return Math.abs((contact.x - x) * Math.cos(angle) + (contact.y - y) * Math.sin(angle)) <
+      this.height * radius * (note.master.get_viewport?.().gameplayScale ?? 1) * (note.judgeArea ?? 1);
   }
   input(id: string, x: number, y: number, kind: 'tap' | 'move' | 'release', time: number, width: number, height: number, keyboard: boolean): void {
     this.width = width;

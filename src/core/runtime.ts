@@ -1,4 +1,4 @@
-import type { ChartInfo, LocalChart, RuntimeNote, Settings } from '../types';
+import type { ChartInfo, HudElement, LocalChart, RuntimeNote, Settings } from '../types';
 import { Judge } from './judge';
 import { HudTextRenderer } from './hud-text';
 import { activeHitEffects, autoplayHoldTimes, createHitEffect, HitEffectRenderer } from './hit-effects';
@@ -18,6 +18,9 @@ import { videoFormats, type BrowserCodec, type EncodingOptions, type FFmpegCodec
 import './canvas';
 import { linear, find_event, init_speed_events, merge_notes, init_note_fp, get_event_val, get_fp, rotate_point } from './timeline';
 import { createLineStateResolver, lineAppearance } from './chart-state';
+import { ChartTextures } from './chart-textures';
+import { applyHudAttachment, gameHudLayout, hudAttachment, inverseHudPoint } from './chart-hud';
+import { chartViewport, hasChartViewport, resolveChartAspect } from './chart-viewport';
 
 // Original rendering state includes optional uniforms for chart-specific effect passes.
 const C: any = {
@@ -2024,11 +2027,16 @@ const resize_to_window = () => {
 
 /* ---------------- 主渲染 ---------------- */
 
+const game_chart_viewport = () => chartViewport(cv.width, cv.height, resolveChartAspect(C.chart.data?.aspectRatio, settings?.chartAspectRatio));
+
 /* mode: undefined=整帧（普通谱）| "bg"=只画曲绘（异象分层的背景画布）|
    "fg"=只画判定线/note/打击特效+方块 mask（透明底）。 */
 const render_scene = (sctx, t, mode?) => {
     const [w, h] = [cv.width, cv.height];
-    const note_width = h * (9.89 * 0.22 / 10) * (settings?.noteScale ?? 1) * noteViewportScale(w, h);
+    const adapted = hasChartViewport(C.chart.data), viewport = game_chart_viewport();
+    const objectScale = adapted ? viewport.gameplayScale : 1;
+    const objectHeight = h * objectScale, objectWidth = adapted ? viewport.width : w;
+    const note_width = h * (9.89 * 0.22 / 10) * (settings?.noteScale ?? 1) * (adapted ? objectScale : noteViewportScale(w, h));
 
     sctx.setTransform(1, 0, 0, 1, 0, 0);
     sctx.globalAlpha = 1;
@@ -2041,6 +2049,8 @@ const render_scene = (sctx, t, mode?) => {
         sctx.fillRectEx(0, 0, w, h, `rgba(0, 0, 0, ${1 - (settings?.brightness ?? 0.65)})`);
     }
     if (mode === "bg") return;   // 背景画布到此为止；前景在另一张画布上画
+    sctx.save();
+    if (adapted) { sctx.beginPath(); sctx.rect(viewport.left, 0, viewport.width, h); sctx.clip(); }
 
     // Bad copies are Background/3 at z=original+1, behind the judgement lines.
     if (!settings.autoplay && !C.video_export_active) {
@@ -2050,8 +2060,8 @@ const render_scene = (sctx, t, mode?) => {
             const note = effect.note, line = note.master as any;
             const [rotation, x, y] = line.get_state(t);
             const frozenFloor = ((note.floorPosition ?? 0) - get_fp(line.sec2beat(effect.time), line.speedEvents)) *
-                C.units.pgrh * (C.units.pgrbeat / line.bpm) * h * note.speed;
-            const local = rotate_point(x * w, y * h, note.positionX * C.units.pgrw * w, rotation);
+                C.units.pgrh * (C.units.pgrbeat / line.bpm) * objectHeight * note.speed;
+            const local = rotate_point(x * w, y * h, note.positionX * C.units.pgrw * objectWidth, rotation);
             const position = rotate_point(...local, frozenFloor, rotation - (note.is_above ? 90 : -90));
             const img = C.note_imgs.badTap;
             if (!img) continue;
@@ -2064,12 +2074,13 @@ const render_scene = (sctx, t, mode?) => {
     const indicatorColor = judgeLineColor(settings.apFcIndicator ?? true,
         settings.autoplay || C.video_export_active ? { good: 0, bad: 0, miss: 0 } : (C.line_status ?? judge.stats));
     for (const line of [...C.chart.data.judgeLineList].sort((a, b) => (a.animation?.zOrder ?? 0) - (b.animation?.zOrder ?? 0))) {
+        if (line.animation?.attachUI) continue;
         let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
         const appearance = lineAppearance(line, t);
         lineX *= w; lineY *= h;
         const lineDrawPos = [
-            ...rotate_point(lineX, lineY, h * C.lineh * appearance.scaleX, lineRotate),
-            ...rotate_point(lineX, lineY, h * C.lineh * appearance.scaleX, lineRotate + 180)
+            ...rotate_point(lineX, lineY, objectHeight * C.lineh * appearance.scaleX, lineRotate),
+            ...rotate_point(lineX, lineY, objectHeight * C.lineh * appearance.scaleX, lineRotate + 180)
         ];
 
         sctx.save();
@@ -2077,10 +2088,23 @@ const render_scene = (sctx, t, mode?) => {
         if (appearance.text !== undefined) {
             sctx.translate(lineX, lineY); sctx.rotate(lineRotate * Math.PI / 180);
             sctx.scale(appearance.scaleX, appearance.scaleY);
-            sctx.font = `${h * 60 / 900}px sans-serif`; sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
+            sctx.font = `${objectHeight * 60 / 900}px sans-serif`; sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
             sctx.fillStyle = appearance.color || '#ffffff';
-            appearance.text.split('\n').forEach((text, i, rows) => sctx.fillText(text, 0, (i - (rows.length - 1) / 2) * h * 72 / 900));
-        } else sctx.drawLine(...lineDrawPos, Math.abs(h * C.linew * appearance.scaleY), appearance.color || indicatorColor);
+            const rows = appearance.text.split('\n');
+            const textWidth = Math.max(...rows.map(text => sctx.measureText(text).width));
+            const textHeight = rows.length * objectHeight * 72 / 900;
+            const [ax, ay] = line.animation?.anchor ?? [.5, .5];
+            rows.forEach((text, i) => sctx.fillText(text, (.5 - ax) * textWidth,
+                (ay - .5) * textHeight + (i - (rows.length - 1) / 2) * objectHeight * 72 / 900));
+        } else if (line.animation?.texture) {
+            const texture = C.chart.textures?.get(line.animation.texture, t, appearance.gifProgress, appearance.color);
+            if (texture) {
+                const [ax, ay] = line.animation.anchor ?? [.5, .5];
+                sctx.translate(lineX, lineY); sctx.rotate(lineRotate * Math.PI / 180);
+                sctx.scale(viewport.textureScale * appearance.scaleX, viewport.textureScale * appearance.scaleY);
+                sctx.drawImage(texture.image, -ax * texture.width, (ay - 1) * texture.height, texture.width, texture.height);
+            }
+        } else sctx.drawLine(...lineDrawPos, Math.abs(objectHeight * C.linew * appearance.scaleY), appearance.color || indicatorColor);
         sctx.restore();
     }
     // All judgement lines precede all notes, including notes from other lines.
@@ -2119,7 +2143,7 @@ const render_scene = (sctx, t, mode?) => {
                 if (line.animation.cover && note.sect >= t && dist * note.speed < -0.001 && tailDist * note.speed < -0.001) continue;
             } else if (note.sect >= t && dist < -Math.max(note.floorPosition / 6000000, 0.001)) continue;
 
-            let note_fp = dist * C.units.pgrh * (C.units.pgrbeat / line.bpm) * h;
+            let note_fp = dist * C.units.pgrh * (C.units.pgrbeat / line.bpm) * objectHeight;
 
             if (!note.is_hold || line.animation) note_fp *= note.speed;
             if (!note.is_hold && note_fp < -1e6) continue;
@@ -2134,8 +2158,8 @@ const render_scene = (sctx, t, mode?) => {
             const this_note_width = base_note_width * (note.size ?? 1);
             const this_note_head_height = base_note_width / note_head_img.width * note_head_img.height;
             const l2n_rotate = lineRotate - (note.is_above ? 90 : -90);
-            const note_atline_pos = rotate_point(...rotate_point(lineX, lineY, note.positionX * C.units.pgrw * w, lineRotate),
-                (note.yOffset ?? 0) * note.speed * C.units.pgrh * h, l2n_rotate);
+            const note_atline_pos = rotate_point(...rotate_point(lineX, lineY, note.positionX * C.units.pgrw * objectWidth, lineRotate),
+                (note.yOffset ?? 0) * note.speed * C.units.pgrh * objectHeight, l2n_rotate);
             const note_head_pos = rotate_point(...note_atline_pos, note_fp, l2n_rotate);
 
             const note_draw_rotate = lineRotate + (note.is_above ? 0 : 180);
@@ -2167,7 +2191,7 @@ const render_scene = (sctx, t, mode?) => {
                    修法：clicked 起用 (t−sect)/secht 线性收缩，未点击保持全长。 */
                 const attached = t > note.sect && !note.isFake;
                 const hold_full = line.animation
-                    ? Math.max(0, (get_fp(note.time + note.holdTime, line.speedEvents) - (attached ? linefp : note.floorPosition)) * C.units.pgrh * h * note.speed)
+                    ? Math.max(0, (get_fp(note.time + note.holdTime, line.speedEvents) - (attached ? linefp : note.floorPosition)) * C.units.pgrh * objectHeight * note.speed)
                     : note.hold_length * h;
                 const hold_shrink = attached && !line.animation
                     ? hold_full * Math.min(1, Math.max(0, (t - note.sect) / Math.max(note.secht, 1e-6)))
@@ -2214,6 +2238,7 @@ const render_scene = (sctx, t, mode?) => {
         ? activeHitEffects(C.chart.data.click_effect_collection, t, settings.speed)
         : judge.hitEffects;
     hit_effects.draw(sctx, effects, t, w, h, settings.noteScale, settings.speed);
+    sctx.restore();
 };
 
 /* 渲染「某一时刻」的一帧。时间轴 = get_time() 域（秒，即音乐秒），内部再减谱面 offset。
@@ -2658,7 +2683,7 @@ const rebuild_click_effects = () => {
 const init_chart = () => {
     const data = C.chart.data;
     const note_sect_counter = new Map();
-    const lineState = createLineStateResolver(data.judgeLineList);
+    const lineState = createLineStateResolver(data.judgeLineList, () => game_chart_viewport().aspect);
 
     for (const line of data.judgeLineList) {
         line.speedEvents.sort((a, b) => a.startTime - b.startTime);
@@ -2669,8 +2694,12 @@ const init_chart = () => {
         line.sec2beat = function (t) { return t / (C.units.pgrbeat / this.bpm); };
         line.beat2sec = function (t) { return t * (C.units.pgrbeat / this.bpm); };
         line.get_state = function (t) {
-            return lineState(this, t);
+            const state = lineState(this, t);
+            if (!this.animation) return state;
+            const viewport = game_chart_viewport();
+            return [state[0], (viewport.left + state[1] * viewport.width) / cv.width, state[2], state[3]];
         };
+        if (line.animation) line.get_viewport = game_chart_viewport;
 
         init_speed_events(line.speedEvents);
         line.notes = merge_notes(line.notesAbove, line.notesBelow);
@@ -2830,6 +2859,7 @@ const load_chart = async (dir, assetDir?, anomaly?, imageUrl?) => {
         music.addEventListener("ended", music_ended);
     }
 
+    C.chart.textures?.dispose();
     C.chart = { info, data, image, background, music, postfx, dir, assetDir: adir, blocks: [] };
     C.resultImage = image;
     C.postfx = postfx;
@@ -2921,29 +2951,9 @@ const load_game_hud = async () => {
 // 因此可见高度是 1000 个 UI 单位，CanvasScaler 的 1920×1080 / match=0.6 不参与屏幕适配。
 // LevelUICont.Update @0x1D81B18 会覆盖四角元素的 localPosition，不能使用静态 anchoredPosition。
 // UI 开场动画结束后父节点比例为 1；这里先复现正常游玩期间的布局。
-const game_hud_layout = (w = cv.width, h = cv.height) => {
-    const scale = h / 1000;
-    const width = w / scale;
-    const half_width = w / h >= 16 / 9 ? 888.888916015625 : width / 2;
-    const left = width / 2 - half_width;
-    const right = width / 2 + half_width;
-    return { scale, width, height: 1000, half_width,
-        // Pause pivot=(0.5,0.5)，Score pivot=(0.5,0.5)、宽400、MiddleRight。
-        pause: { x: left + 50.589 - 34.262 / 2, y: 500 - 444.3 - 37.966 / 2,
-            width: 34.262, height: 37.966 },
-        score: { x: right - 237.39 + 200, y: 500 - 445.7 },
-        combo: { x: width / 2, y: 500 - 452 },
-        combo_text: { x: width / 2, y: 500 - 405 },
-        // 底部两个 Rect 的 pivot 在底边、高46；文本框中心比 pivot 高23。
-        // 沿用原字体 ascent=.88em 的布局基线；框中心到基线为(.88-.5)*字号。
-        song: { x: left + 40, y: 500 + 473.2 - 23 },
-        level: { x: right - 40, y: 500 + 473.2 - 23 },
-        // RawBackground 左右子 Rect 各1000×1000，内边界固定在中心±888.889。
-        cover: { left: width / 2 - 888.8889, right: width / 2 + 888.8889, width: 1000 },
-        // ProgressControl.Update @0x1D8600C：pivot=(1,1)，右端 x=a*(2*p-1)、y=500。
-        // 精灵本体宽1919、高11，横向平移后由窗口裁切，不按进度拉伸精灵。
-        progress: { left, span: 2 * half_width, width: 1919, height: 11 } };
-};
+// HUD 大小仍按屏高；适配谱面的左右锚点取 cover 内侧，attachUI 再单独施加变换。
+const game_hud_layout = (w = cv.width, h = cv.height) =>
+    gameHudLayout(w, h, hasChartViewport(C.chart.data) ? chartViewport(w, h, resolveChartAspect(C.chart.data.aspectRatio, settings?.chartAspectRatio)) : undefined);
 
 // UI/TranslucentImage：黑色 Image、spriteBlending=.5、vibrancy=1 时，
 // flatten 项为0，最终 RGB = .5 * clamp(blurredBackground + .02, 0, 1)，alpha=1。
@@ -2970,6 +2980,9 @@ const draw_game_text = (ctx: CanvasRenderingContext2D, value, size, align: Canva
     hud_text.draw(ctx, value, size, align, x, y, max_width, C.game_hud.font?.metrics);
 };
 
+const game_hud_attachment = (element: HudElement, t: number, layout = game_hud_layout()) =>
+    hudAttachment(C.chart.data.judgeLineList, element, t, (line, time) => (line as any).get_state(time), layout.width, layout.height);
+
 const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1, comboAlpha = 1, sideBlend = 1) => {
     if (!chart_started || lib_loading) return;
     if (scaleY !== 1) {
@@ -2983,6 +2996,10 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
     }
     const hud = C.game_hud;
     const layout = game_hud_layout();
+    const chartTime = t_raw - C.chart.data.offset + settings.offset / 1000;
+    const attached = (element: HudElement, x: number, y: number, draw: () => void) => {
+        ctx.save(); applyHudAttachment(ctx, game_hud_attachment(element, chartTime, layout), x, y); draw(); ctx.restore();
+    };
     ctx.save();
     ctx.setTransform(layout.scale, 0, 0, layout.scale, 0, 0);
     ctx.globalAlpha = 1;
@@ -2996,26 +3013,32 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
     const progress = Math.max(0, Math.min(1, (t_raw - C.chart.data.offset) / duration));
     if (hud.imgs.progress && progress > 0) {
         const bar = layout.progress;
-        ctx.drawImage(hud.imgs.progress, bar.left + bar.span * progress - bar.width,
-            0, bar.width, bar.height);
+        attached('bar', bar.left, bar.height / 2, () => ctx.drawImage(hud.imgs.progress, bar.left + bar.span * progress - bar.width,
+            0, bar.width, bar.height));
     }
     // Level.unity Canvas 子节点顺序：progress → RawBackground → pause/其余文字。
     ctx.save(); ctx.globalAlpha *= sideBlend; draw_game_cover(ctx, layout); ctx.restore();
     const button = layout.pause;
-    if (hud.imgs.pause) ctx.drawImage(hud.imgs.pause, button.x, button.y, button.width, button.height);
+    if (hud.imgs.pause) attached('pause', button.x, button.y,
+        () => ctx.drawImage(hud.imgs.pause, button.x, button.y, button.width, button.height));
 
     const text = (value, size, align: CanvasTextAlign, x, y, max_width) => draw_game_text(ctx, value, size, align, x, y, max_width);
-    text(String(Math.round(hud.score)).padStart(7, "0"), 50, "right", layout.score.x, layout.score.y, 400);
+    attached('score', layout.score.x, layout.score.y,
+        () => text(String(Math.round(hud.score)).padStart(7, "0"), 50, "right", layout.score.x, layout.score.y, 400));
     if (hud.combo > 2) {
-        text(hud.combo, 70, "center", layout.combo.x, layout.combo.y, 400);
+        attached('combonumber', layout.combo.x, layout.combo.y,
+            () => text(hud.combo, 70, "center", layout.combo.x, layout.combo.y, 400));
         ctx.save(); ctx.globalAlpha *= comboAlpha;
-        text("COMBO", 24, "center", layout.combo_text.x, layout.combo_text.y, 200); ctx.restore();
+        attached('combo', layout.combo_text.x, layout.combo_text.y,
+            () => text("COMBO", 24, "center", layout.combo_text.x, layout.combo_text.y, 200)); ctx.restore();
     }
     const name_width = Math.min(650, Math.max(1, (layout.level.x - layout.song.x - 24) / 2));
-    text(C.chart.info.name || "", 36, "left", layout.song.x, layout.song.y, name_width);
+    attached('name', layout.song.x, layout.song.y,
+        () => text(C.chart.info.name || "", 36, "left", layout.song.x, layout.song.y, name_width));
     // Gameplay 难度只显示整数部分（16.5 → 16），保留谱面库及原始定数。
     const level = (C.chart.info.level || "").replace(/(\d+)\.\d+/g, "$1");
-    text(level, 36, "right", layout.level.x, layout.level.y, name_width);
+    attached('level', layout.level.x, layout.level.y,
+        () => text(level, 36, "right", layout.level.x, layout.level.y, name_width));
     ctx.restore();
 };
 
@@ -3352,8 +3375,10 @@ const init_player = async () => {
         }
         if (C.scene !== 'game') return;
         const button = layout.pause;
-        if (x >= button.x - 12 && x <= button.x + button.width + 12 &&
-            y >= button.y - 12 && y <= button.y + button.height + 12) { pause(); transitionScene('pause'); }
+        const attachment = game_hud_attachment('pause', get_time() - C.chart.data.offset + settings.offset / 1000, layout);
+        const point = inverseHudPoint(x, y, attachment, button.x, button.y);
+        if (point && point[0] >= button.x - 12 && point[0] <= button.x + button.width + 12 &&
+            point[1] >= button.y - 12 && point[1] <= button.y + button.height + 12) { pause(); transitionScene('pause'); }
     });
 
     /* 导出视频面板 */
@@ -3478,16 +3503,19 @@ export const simulator = {
         if (!render_started) { render_started = true; render(); }
         lib_loading = true;
         const urls: string[] = [];
+        let textures: ChartTextures | undefined;
         const url = (blob: Blob) => { const value = URL.createObjectURL(blob); urls.push(value); return value; };
         try {
             const music = await load_audioele(url(chart.music));
             const image = await load_img(chart.image ? url(chart.image) : R('/assets/builtin/s6/image.png'));
+            textures = await ChartTextures.load(chart.textures);
             C.chart.music?.pause();
             C.chart.music?.remove();
             localUrls.forEach(value => URL.revokeObjectURL(value));
             localUrls = urls;
+            C.chart.textures?.dispose();
             C.chart = { info: chart.info, data: structuredClone(chart.data), music, image, background: null,
-                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id };
+                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id, textures };
             C.loadingImage = image; C.resultImage = image;
             C.postfx = chart.postfx || null;
             C.glitch_img = null;
@@ -3496,7 +3524,7 @@ export const simulator = {
             init_chart();
             reset_judge();
             this.ready();
-        } catch (error) { urls.forEach(value => URL.revokeObjectURL(value)); throw error; }
+        } catch (error) { textures?.dispose(); urls.forEach(value => URL.revokeObjectURL(value)); throw error; }
         finally { lib_loading = false; }
     },
     ready() {

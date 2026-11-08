@@ -13,14 +13,29 @@ export class HudTextRenderer {
     const chars = Array.from(text);
     const table = metrics?.sizes[size];
     const transform = ctx.getTransform();
-    const density = transform.a;
-    if (!(density > 0) || transform.b || transform.c || transform.d !== density) return;
+    const affine = transform.b !== 0 || transform.c !== 0 || transform.d !== transform.a || transform.a < 0;
+    const density = affine ? Math.max(Math.hypot(transform.a, transform.b), Math.hypot(transform.c, transform.d)) : transform.a;
+    if (!(density > 0)) return;
     const known = table && chars.every(char => table[char]);
     const measure = this.scratch.getContext('2d')!;
     measure.font = `400 ${size}px PhiHUD, sans-serif`;
     const width = known ? chars.reduce((sum, char) => sum + table[char].advance, 0) : measure.measureText(text).width;
     const fit = width > maxWidth ? maxWidth / width : 1;
     const pixelSize = size * fit * density;
+    if (affine) {
+      let pen = x - width * fit * (align === 'right' || align === 'end' ? 1 : align === 'center' ? .5 : 0);
+      const baseline = y + ((metrics?.ascent ?? .88) - .5) * size * fit;
+      const draw = (value: string) => {
+        const glyph = this.raster(value, pixelSize);
+        ctx.drawImage(glyph.image, pen + glyph.left / density, baseline + glyph.top / density,
+          glyph.image.width / density, glyph.image.height / density);
+      };
+      if (known) for (const char of chars) {
+        if (table[char].w) draw(char);
+        pen += table[char].advance * fit;
+      } else draw(text);
+      return;
+    }
     const baseline = Math.round((y + ((metrics?.ascent ?? 0.88) - 0.5) * size * fit) * density + transform.f);
     let pen = x - width * fit * (align === 'right' || align === 'end' ? 1 : align === 'center' ? 0.5 : 0);
     ctx.save();

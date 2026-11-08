@@ -123,3 +123,26 @@ it('leaves reused JSON metadata and postfx intact', async () => {
   expect(result[0].info).toMatchObject({ name: 'JSON Info', illustrator: 'Painter' });
   expect(result[0].postfx).toEqual({ curves: { brightness: [[0, 1]] } });
 });
+
+it('preserves referenced line images and GIFs without mistaking them for chart artwork', async () => {
+  const raw = { META: {}, BPMList: [{ startTime: [0, 0, 1], bpm: 120 }],
+    judgeLineList: [{ Texture: 'Textures\\Panel.PNG' }, { Texture: 'textures/anim.gif' }] };
+  const result = await importFiles([await archive({ 'pack/chart.json': JSON.stringify(raw), 'pack/song.ogg': 'song',
+    'pack/textures/panel.png': 'panel', 'pack/textures/anim.GIF': 'animation' })], () => {});
+  expect(Object.keys(result[0].textures!)).toEqual(['Textures\\Panel.PNG', 'textures/anim.gif']);
+  expect(await result[0].textures!['textures/anim.gif'].text()).toBe('animation');
+  expect(result[0].image).toBeUndefined();
+  expect(result[0].data.warnings).toEqual([]);
+});
+
+it('reports a missing custom texture instead of drawing a replacement judgement line', async () => {
+  const raw = { META: {}, BPMList: [{ startTime: [0, 0, 1], bpm: 120 }], judgeLineList: [{ Texture: 'missing.png' }] };
+  await expect(importFiles([await archive({ 'chart.json': JSON.stringify(raw), 'music.ogg': 'song' })], () => {})).rejects.toThrow('missing.png');
+});
+
+it('preserves the chart aspect ratio from info.yml and rejects invalid ratios', async () => {
+  const files = { 'chart.pec': pec, 'music.ogg': 'music', 'info.yml': 'chart: chart.pec\naspectRatio: 1.3333333333333333' };
+  const result = await importFiles([await archive(files)], () => {});
+  expect(result[0].data.aspectRatio).toBeCloseTo(4 / 3);
+  await expect(importFiles([await archive({ ...files, 'info.yml': 'chart: chart.pec\naspectRatio: 0' })], () => {})).rejects.toThrow('aspectRatio');
+});
