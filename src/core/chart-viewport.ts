@@ -14,8 +14,9 @@ export interface ChartViewport {
 }
 
 // Match the chart camera: cap very wide screens to the chart's aspect ratio,
-// while narrower screens retain their full height. Object pixels use one world
-// scale on both axes; normalized line translations still span the viewport.
+// while narrower screens retain their full height. Sprite pixels use one world
+// scale on both axes. Normalized translations span the viewport; note scroll
+// distances use the full canvas height.
 export function chartViewport(width: number, height: number, aspect = defaultChartAspect): ChartViewport {
   const chartWidth = Math.min(width, height * aspect);
   return { left: (width - chartWidth) / 2, width: chartWidth, height,

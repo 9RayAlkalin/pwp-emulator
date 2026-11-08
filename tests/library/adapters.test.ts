@@ -55,6 +55,41 @@ describe('PEC adapter', () => {
 });
 
 describe('RPE adapter', () => {
+  it('keeps authored initial transforms during offset lead-in so a parked future Hold stays offscreen', () => {
+    const raw = rpe([{ eventLayers: [{ moveXEvents: [e(1318.359375)], moveYEvents: [e(1285.7142857142858)],
+      rotateEvents: [e(20)], alphaEvents: [e(0)], speedEvents: [e(4.5)] }],
+      extended: { scaleXEvents: [e(2)], scaleYEvents: [e(.5)], colorEvents: [{ ...e(0), start: [120, 180, 220], end: [120, 180, 220] }] },
+      notes: [{ type: 2, startTime: b(289), endTime: [289, 1, 2], isFake: 1 }] }]);
+    raw.META.offset = 1315;
+    const chart = parseChart(raw), line = chart.judgeLineList[0], state = createLineStateResolver([line]);
+    expect(state(line, -chart.offset)).toEqual(state(line, 0));
+    expect(state(line, -chart.offset)[1]).toBeGreaterThan(1);
+    expect(state(line, -chart.offset)[2]).toBeLessThan(0);
+    expect(lineAppearance(line, -chart.offset)).toMatchObject({ scaleX: 2, scaleY: .5, color: 'rgb(120,180,220)' });
+    init_speed_events(line.speedEvents);
+    expect(get_fp(-chart.offset, line.speedEvents)).toBe(0);
+    expect(get_fp(0, line.speedEvents)).toBe(0);
+  });
+  it('uses the earliest initial transform without advancing future events or losing negative-time animation', () => {
+    const chart = parseChart(rpe([{ eventLayers: [{ moveXEvents: [e(675, 0, 2, 4), e(135, 270, 0, 2)],
+      moveYEvents: [e(90, 180, 2, 4)], rotateEvents: [e(20, 40, -2, 0)] }] }]));
+    const line = chart.judgeLineList[0], state = createLineStateResolver([line]);
+    expect(state(line, -2).slice(0, 3)).toEqual([20, .6, .5]);
+    expect(state(line, -.5)[0]).toBeCloseTo(30);
+    expect(state(line, 0).slice(0, 3)).toEqual([40, .6, .5]);
+    expect(state(line, 1)[1]).toBe(1);
+    expect(state(line, 1)[2]).toBeCloseTo(.4);
+  });
+  it.each([1315, -250, 0])('places beat zero at music time META.offset=%i ms without changing event or note beats', offset => {
+    const raw = rpe([{ eventLayers: [{ moveXEvents: [e(0, 675, 0, 2)] }], notes: [{ type: 1, startTime: b(1) }] }]);
+    raw.META.offset = offset;
+    const chart = parseChart(raw), line = chart.judgeLineList[0], state = createLineStateResolver([line]);
+    expect(chart.offset).toBeCloseTo(offset / 1000);
+    expect(line.notesAbove[0].time).toBe(.5);
+    const hitMusicTime = .5 + offset / 1000;
+    expect(hitMusicTime - chart.offset).toBeCloseTo(.5);
+    expect(state(line, hitMusicTime - chart.offset)[1]).toBeCloseTo(.75);
+  });
   it('preserves layered XY curves across tempo changes and integrates linear speeds with bpmfactor', () => {
     const raw = rpe([{ bpmfactor: 2, eventLayers: [
       { moveXEvents: [e(0, 675, 0, 4, 5)], alphaEvents: [e(255)], speedEvents: [e(4.5, 9)] },
@@ -65,7 +100,7 @@ describe('RPE adapter', () => {
       { type: 4, startTime: b(1) },
     ] }]);
     const chart = parseChart(raw), line = chart.judgeLineList[0], state = createLineStateResolver([line]);
-    expect(chart.offset).toBe(-.25);
+    expect(chart.offset).toBe(.25);
     expect(line.notesAbove[0]).toMatchObject({ type: 3, time: 3, holdTime: 3, positionX: 1, speed: 2 });
     expect(line.notesAbove[1].type).toBe(2);
     expect(line.notesBelow[0]).toMatchObject({ type: 4, time: 2, isFake: true, size: 1.4 });

@@ -37,7 +37,15 @@ export function parseRpe(value: unknown): ChartData {
     const factor = finite(s.bpmfactor, 'RPE bpmfactor', 1);
     if (factor <= 0) throw new Error('RPE bpmfactor 必须大于零');
     const layers = array(s.eventLayers, 'RPE eventLayers').filter(v => v != null).map(v => record(v, 'RPE 事件层'));
-    const compile = (raw: unknown, fallback = 0, scale = 1, channel?: number) => compileTrack(events(raw, channel), tempo, fallback, factor, scale);
+    const compile = (raw: unknown, fallback = 0, scale = 1, channel?: number, holdInitial = true) => {
+      const input = events(raw, channel);
+      const first = input.reduce<BeatEvent | undefined>((first, event) => !first || event.startTime < first.startTime ? event : first, undefined);
+      // During a positive-offset lead-in, keep the authored time-zero pose.
+      // Resetting an offscreen line to the centre exposes its far-future notes.
+      // Speed still integrates from its explicit events, with zero beforehand.
+      const initial = holdInitial && first && first.startTime <= 0 ? first.start! : fallback;
+      return compileTrack(input, tempo, initial, factor, scale);
+    };
     const tracks = (name: string, scale = 1) => layers.map(layer => compile(layer[name], 0, scale));
     const ext = record(s.extended ?? {}, 'RPE extended');
     const father = finite(s.father, 'RPE father', -1);
@@ -72,7 +80,7 @@ export function parseRpe(value: unknown): ChartData {
         return compiled.map(v => ({ startTime: v.startTime, endTime: v.endTime, start: e.start, end: e.end, easing: v.easing }));
       }).sort((a, b) => a.startTime - b.startTime);
     }
-    l.speedEvents = combineSpeeds(layers.length ? layers.map(layer => compile(layer.speedEvents, 0, 1 / 4.5)) : [compile(undefined)]);
+    l.speedEvents = combineSpeeds(layers.length ? layers.map(layer => compile(layer.speedEvents, 0, 1 / 4.5, undefined, false)) : [compile(undefined)]);
     const version = finite(meta.RPEVersion, 'RPEVersion', 0);
     if (version >= 162 && version < 170 && layers.some(layer => array(layer.speedEvents, 'RPE speedEvents').some(e => e.easingType && e.easingType !== 1))) warnings.add('RPE 162–169 的非线性流速按当前缓动规则近似播放，旧版导函数行为尚未复现');
     for (const value of array(s.notes, 'RPE notes')) {
@@ -111,6 +119,8 @@ export function parseRpe(value: unknown): ChartData {
     visiting.delete(index); visited.add(index);
   }
   lines.forEach((_, i) => visit(i));
-  return { formatVersion: 3, sourceFormat: 'rpe', offset: -finite(meta.offset, 'RPE META.offset', 0) / 1000,
+  // Runtime chart time is music time minus offset. Positive RPE milliseconds
+  // delay beat zero; the 焦糖星 reference audio/video confirms this direction.
+  return { formatVersion: 3, sourceFormat: 'rpe', offset: finite(meta.offset, 'RPE META.offset', 0) / 1000,
     judgeLineList: lines, warnings: [...warnings] };
 }

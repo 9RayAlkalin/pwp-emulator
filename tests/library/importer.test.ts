@@ -81,7 +81,16 @@ it('uses RPE META as a fallback and detects JSON content even with a .pec extens
   const result = await importFiles([await archive({ 'score.pec': JSON.stringify(rpe),
     'one.ogg': '1', 'two.ogg': '22', 'one.png': '1', 'two.png': '22' })], () => {});
   expect(result[0].info.name).toBe('From RPE'); expect(result[0].music.size).toBe(2); expect(result[0].image!.size).toBe(2);
-  expect(result[0].data.offset).toBe(-.1);
+  expect(result[0].data.offset).toBe(.1);
+});
+
+it.each([.2, -.2])('adds info.yml offset=%s seconds to the RPE millisecond delay', async offset => {
+  const rpe = { META: { offset: 1315 }, BPMList: [{ startTime: [0, 0, 1], bpm: 110 }],
+    judgeLineList: [{ eventLayers: [], notes: [{ type: 1, startTime: [11, 0, 1] }] }] };
+  const result = await importFiles([await archive({ 'chart.json': JSON.stringify(rpe), 'music.ogg': 'song',
+    'info.yml': `chart: chart.json\noffset: ${offset}` })], () => {});
+  expect(result[0].data.offset).toBeCloseTo(1.315 + offset);
+  expect(result[0].data.judgeLineList[0].notesAbove[0].time).toBeCloseTo(6);
 });
 
 it('keeps separate archives with duplicate filenames isolated', async () => {

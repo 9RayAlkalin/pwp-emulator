@@ -23,4 +23,13 @@ describe('start button scene flow', () => {
     expect(entrancePhase(10, 11.5, true, 1)).toBe('game');
     expect(entrancePhase(10, 11.5, true, 20)).toBe('game');
   });
+
+  it('holds gameplay until the full opening boundary even when loading was skipped', () => {
+    for (const time of [0, .1, .5, 1.05, 1.083334, 1.499999]) {
+      expect(entrancePhase(0,time,true,1)).toBe('opening');
+    }
+    expect(entrancePhase(0,1.5,true,1)).toBe('game');
+    expect(entrancePhase(0,3.999999,false,1)).toBe('opening');
+    expect(entrancePhase(0,4,false,1)).toBe('game');
+  });
 });

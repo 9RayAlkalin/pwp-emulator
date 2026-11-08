@@ -1,6 +1,7 @@
 export type EntrancePhase = 'ready' | 'loading' | 'enter' | 'opening' | 'game';
 export const loadingDisplaySeconds = 1.5;
-// ProgressControl.Update RVA 0x1d885b8: first normal play schedules audio after 1.5 s.
+// Playback stays frozen for the full gameplay opening, including the original
+// 1.0833 s Began curve and the HUD entrance. Live playback/export share this gate.
 export const gameplayOpeningSeconds = 1.5;
 // ProgressControl.Update RVA 0x1d88a58: normal completion waits 3.5 s before capture.
 export const gameplayEndingSeconds = 3.5;

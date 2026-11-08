@@ -18,8 +18,8 @@ import { videoFormats, type BrowserCodec, type EncodingOptions, type FFmpegCodec
 import './canvas';
 import { linear, find_event, init_speed_events, merge_notes, init_note_fp, get_event_val, get_fp, rotate_point } from './timeline';
 import { createLineStateResolver, lineAppearance } from './chart-state';
-import { ChartTextures } from './chart-textures';
-import { applyHudAttachment, gameHudLayout, hudAttachment, inverseHudPoint } from './chart-hud';
+import { ChartTextures, textureIsVisible } from './chart-textures';
+import { applyHudAttachment, gameHudLayout, hudAttachment, hudPointCovered, inverseHudPoint } from './chart-hud';
 import { chartViewport, hasChartViewport, resolveChartAspect } from './chart-viewport';
 
 // Original rendering state includes optional uniforms for chart-specific effect passes.
@@ -2031,7 +2031,8 @@ const game_chart_viewport = () => chartViewport(cv.width, cv.height, resolveChar
 
 /* mode: undefined=整帧（普通谱）| "bg"=只画曲绘（异象分层的背景画布）|
    "fg"=只画判定线/note/打击特效+方块 mask（透明底）。 */
-const render_scene = (sctx, t, mode?) => {
+const render_scene = (sctx, t, mode?, preview = false) => {
+    if (!preview) C.openingPreview = null;
     const [w, h] = [cv.width, cv.height];
     const adapted = hasChartViewport(C.chart.data), viewport = game_chart_viewport();
     const objectScale = adapted ? viewport.gameplayScale : 1;
@@ -2053,14 +2054,14 @@ const render_scene = (sctx, t, mode?) => {
     if (adapted) { sctx.beginPath(); sctx.rect(viewport.left, 0, viewport.width, h); sctx.clip(); }
 
     // Bad copies are Background/3 at z=original+1, behind the judgement lines.
-    if (!settings.autoplay && !C.video_export_active) {
+    if (!preview && !settings.autoplay && !C.video_export_active) {
         for (const effect of judge.badEffects) {
             const alpha = badNoteAlpha(effect.elapsed);
             if (!alpha) continue;
             const note = effect.note, line = note.master as any;
             const [rotation, x, y] = line.get_state(t);
             const frozenFloor = ((note.floorPosition ?? 0) - get_fp(line.sec2beat(effect.time), line.speedEvents)) *
-                C.units.pgrh * (C.units.pgrbeat / line.bpm) * objectHeight * note.speed;
+                C.units.pgrh * (C.units.pgrbeat / line.bpm) * h * note.speed;
             const local = rotate_point(x * w, y * h, note.positionX * C.units.pgrw * objectWidth, rotation);
             const position = rotate_point(...local, frozenFloor, rotation - (note.is_above ? 90 : -90));
             const img = C.note_imgs.badTap;
@@ -2073,15 +2074,19 @@ const render_scene = (sctx, t, mode?) => {
     }
     const indicatorColor = judgeLineColor(settings.apFcIndicator ?? true,
         settings.autoplay || C.video_export_active ? { good: 0, bad: 0, miss: 0 } : (C.line_status ?? judge.stats));
-    for (const line of [...C.chart.data.judgeLineList].sort((a, b) => (a.animation?.zOrder ?? 0) - (b.animation?.zOrder ?? 0))) {
-        if (line.animation?.attachUI) continue;
+    for (const line of C.chart.renderLines) {
         let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
+        if (lineAlpha <= 0) continue;
         const appearance = lineAppearance(line, t);
+        if (appearance.scaleX === 0 || appearance.scaleY === 0) continue;
         lineX *= w; lineY *= h;
-        const lineDrawPos = [
-            ...rotate_point(lineX, lineY, objectHeight * C.lineh * appearance.scaleX, lineRotate),
-            ...rotate_point(lineX, lineY, objectHeight * C.lineh * appearance.scaleX, lineRotate + 180)
-        ];
+        const textureName = appearance.text === undefined ? line.animation?.texture : undefined;
+        if (textureName) {
+            const size = C.chart.textures?.dimensions(textureName);
+            if (!size || !textureIsVisible(lineX, lineY, size.width, size.height,
+                viewport.textureScale * appearance.scaleX, viewport.textureScale * appearance.scaleY,
+                lineRotate, line.animation.anchor ?? [.5, .5], viewport.left, viewport.left + viewport.width, h)) continue;
+        }
 
         sctx.save();
         sctx.globalAlpha = Math.max(0, Math.min(1, lineAlpha));
@@ -2097,14 +2102,19 @@ const render_scene = (sctx, t, mode?) => {
             rows.forEach((text, i) => sctx.fillText(text, (.5 - ax) * textWidth,
                 (ay - .5) * textHeight + (i - (rows.length - 1) / 2) * objectHeight * 72 / 900));
         } else if (line.animation?.texture) {
-            const texture = C.chart.textures?.get(line.animation.texture, t, appearance.gifProgress, appearance.color);
+            const texture = C.chart.textures?.get(line.animation.texture, t, appearance.gifProgress, appearance.color, 'filter' in sctx,
+                viewport.textureScale * Math.max(Math.abs(appearance.scaleX), Math.abs(appearance.scaleY)));
             if (texture) {
                 const [ax, ay] = line.animation.anchor ?? [.5, .5];
                 sctx.translate(lineX, lineY); sctx.rotate(lineRotate * Math.PI / 180);
                 sctx.scale(viewport.textureScale * appearance.scaleX, viewport.textureScale * appearance.scaleY);
+                if (texture.filter) sctx.filter = texture.filter;
                 sctx.drawImage(texture.image, -ax * texture.width, (ay - 1) * texture.height, texture.width, texture.height);
             }
-        } else sctx.drawLine(...lineDrawPos, Math.abs(objectHeight * C.linew * appearance.scaleY), appearance.color || indicatorColor);
+        } else sctx.drawLine(
+            ...rotate_point(lineX, lineY, objectHeight * C.lineh * appearance.scaleX, lineRotate),
+            ...rotate_point(lineX, lineY, objectHeight * C.lineh * appearance.scaleX, lineRotate + 180),
+            Math.abs(objectHeight * C.linew * appearance.scaleY), appearance.color || indicatorColor);
         sctx.restore();
     }
     // All judgement lines precede all notes, including notes from other lines.
@@ -2115,7 +2125,7 @@ const render_scene = (sctx, t, mode?) => {
         lineX *= w; lineY *= h;
         const beatt = line.sec2beat(t);
         const linefp = get_fp(beatt, line.speedEvents);
-            if ((settings.autoplay || C.video_export_active) && note.sect < t && !note.clicked) {
+            if (!preview && (settings.autoplay || C.video_export_active) && note.sect < t && !note.clicked) {
                 // 视频导出时不发声：导出比实时快，实时播放的打击音必然错位
                 // （导出的音轨只有音乐，见「视频导出」一节），clicked 标记照置。
                 if (!note.isFake && !C.video_export_active && clock.running) play_sound(C.click_sounds[note.type]);
@@ -2143,7 +2153,9 @@ const render_scene = (sctx, t, mode?) => {
                 if (line.animation.cover && note.sect >= t && dist * note.speed < -0.001 && tailDist * note.speed < -0.001) continue;
             } else if (note.sect >= t && dist < -Math.max(note.floorPosition / 6000000, 0.001)) continue;
 
-            let note_fp = dist * C.units.pgrh * (C.units.pgrbeat / line.bpm) * objectHeight;
+            // Scroll distances are height units. The viewport width controls
+            // sprite size, but must not compress note spacing or Hold length.
+            let note_fp = dist * C.units.pgrh * (C.units.pgrbeat / line.bpm) * h;
 
             if (!note.is_hold || line.animation) note_fp *= note.speed;
             if (!note.is_hold && note_fp < -1e6) continue;
@@ -2159,7 +2171,7 @@ const render_scene = (sctx, t, mode?) => {
             const this_note_head_height = base_note_width / note_head_img.width * note_head_img.height;
             const l2n_rotate = lineRotate - (note.is_above ? 90 : -90);
             const note_atline_pos = rotate_point(...rotate_point(lineX, lineY, note.positionX * C.units.pgrw * objectWidth, lineRotate),
-                (note.yOffset ?? 0) * note.speed * C.units.pgrh * objectHeight, l2n_rotate);
+                (note.yOffset ?? 0) * note.speed * C.units.pgrh * h, l2n_rotate);
             const note_head_pos = rotate_point(...note_atline_pos, note_fp, l2n_rotate);
 
             const note_draw_rotate = lineRotate + (note.is_above ? 0 : 180);
@@ -2191,7 +2203,7 @@ const render_scene = (sctx, t, mode?) => {
                    修法：clicked 起用 (t−sect)/secht 线性收缩，未点击保持全长。 */
                 const attached = t > note.sect && !note.isFake;
                 const hold_full = line.animation
-                    ? Math.max(0, (get_fp(note.time + note.holdTime, line.speedEvents) - (attached ? linefp : note.floorPosition)) * C.units.pgrh * objectHeight * note.speed)
+                    ? Math.max(0, (get_fp(note.time + note.holdTime, line.speedEvents) - (attached ? linefp : note.floorPosition)) * C.units.pgrh * h * note.speed)
                     : note.hold_length * h;
                 const hold_shrink = attached && !line.animation
                     ? hold_full * Math.min(1, Math.max(0, (t - note.sect) / Math.max(note.secht, 1e-6)))
@@ -2237,7 +2249,7 @@ const render_scene = (sctx, t, mode?) => {
     const effects = settings.autoplay || C.video_export_active
         ? activeHitEffects(C.chart.data.click_effect_collection, t, settings.speed)
         : judge.hitEffects;
-    hit_effects.draw(sctx, effects, t, w, h, settings.noteScale, settings.speed);
+    if (!preview) hit_effects.draw(sctx, effects, t, w, h, settings.noteScale, settings.speed);
     sctx.restore();
 };
 
@@ -2299,8 +2311,10 @@ const render = () => {
                     transitionScene('game-opening');
                     C.sceneTransition.start = C.entrance.start + (C.entrance.skip ? 0 : loadingDisplaySeconds + originalUI.duration('StartInfoFadeOut'));
                 } else if (phase === 'game') {
+                    const musicTime = C.entrance.musicTime;
                     C.entrance = null;
                     C.scene = 'game'; cv.dataset.scene = 'game'; C.sceneTransition.duration = 0;
+                    clock_seek(musicTime);
                     startMusic();
                 }
             }
@@ -2315,7 +2329,7 @@ const render = () => {
             } else if (C.scene === 'loading' || C.scene === 'loading-exit') {
                 drawSceneOverlay(cv.getContext('2d')!);
             } else if (C.scene === 'game-opening' || C.scene === 'game-over') {
-                drawGameplayTransition(cv.getContext('2d')!, sceneNow() - C.sceneTransition.start, C.scene === 'game-over');
+                drawGameplayTransition(cv.getContext('2d')!, sceneNow() - C.sceneTransition.start, C.scene === 'game-over', C.entrance?.musicTime ?? t_raw);
             } else if (C.chart.data) {
                 render_frame_at(t_raw);
                 update_progress(t_raw);
@@ -2381,7 +2395,8 @@ const render_export_frame = (plan: ExportTimeline, time: number, view: Partial<S
     const frame = exportFrame(plan, time), ctx = cv.getContext('2d')!;
     if (frame.scene === 'game') render_frame_at(frame.musicTime);
     else if (frame.scene === 'game-opening' || frame.scene === 'game-over') {
-        update_game_score(frame.musicTime - C.chart.data.offset + settings.offset / 1000);
+        if (frame.scene === 'game-over') update_game_score(frame.musicTime - C.chart.data.offset + settings.offset / 1000);
+        else update_game_score(-Infinity);
         drawGameplayTransition(ctx, frame.elapsed, frame.scene === 'game-over', frame.musicTime);
     } else drawSceneOverlay(ctx, frame.scene, frame.elapsed, {
         ...view, collection: frame.scene === 'result' && frame.elapsed >= 2 && Number(view.stats?.score || 0) >= 880000,
@@ -2731,6 +2746,8 @@ const init_chart = () => {
     }
 
     init_game_score();
+    C.chart.renderLines = [...data.judgeLineList].filter(line => !line.animation?.attachUI)
+        .sort((a, b) => (a.animation?.zOrder ?? 0) - (b.animation?.zOrder ?? 0));
     C.chart.renderNotes = orderedNotes(data.judgeLineList.flatMap(line => line.notes));
     rebuild_click_effects();
 
@@ -3016,14 +3033,14 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
         attached('bar', bar.left, bar.height / 2, () => ctx.drawImage(hud.imgs.progress, bar.left + bar.span * progress - bar.width,
             0, bar.width, bar.height));
     }
-    // Level.unity Canvas 子节点顺序：progress → RawBackground → pause/其余文字。
-    ctx.save(); ctx.globalAlpha *= sideBlend; draw_game_cover(ctx, layout); ctx.restore();
     const button = layout.pause;
     if (hud.imgs.pause) attached('pause', button.x, button.y,
         () => ctx.drawImage(hud.imgs.pause, button.x, button.y, button.width, button.height));
 
     const text = (value, size, align: CanvasTextAlign, x, y, max_width) => draw_game_text(ctx, value, size, align, x, y, max_width);
-    attached('score', layout.score.x, layout.score.y,
+    // Text is drawn about its vertical centre, while RPE attachUI pivots
+    // are the top-right score corner and the bottom corners of name/level.
+    attached('score', layout.score.x, layout.score.y - 50 / 2,
         () => text(String(Math.round(hud.score)).padStart(7, "0"), 50, "right", layout.score.x, layout.score.y, 400));
     if (hud.combo > 2) {
         attached('combonumber', layout.combo.x, layout.combo.y,
@@ -3033,12 +3050,15 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
             () => text("COMBO", 24, "center", layout.combo_text.x, layout.combo_text.y, 200)); ctx.restore();
     }
     const name_width = Math.min(650, Math.max(1, (layout.level.x - layout.song.x - 24) / 2));
-    attached('name', layout.song.x, layout.song.y,
+    attached('name', layout.song.x, layout.song.y + 36 / 2,
         () => text(C.chart.info.name || "", 36, "left", layout.song.x, layout.song.y, name_width));
     // Gameplay 难度只显示整数部分（16.5 → 16），保留谱面库及原始定数。
     const level = (C.chart.info.level || "").replace(/(\d+)\.\d+/g, "$1");
-    attached('level', layout.level.x, layout.level.y,
+    attached('level', layout.level.x, layout.level.y + 36 / 2,
         () => text(level, 36, "right", layout.level.x, layout.level.y, name_width));
+    // Cover overlays the entire HUD, including any attachUI-transformed parts.
+    // Keep the animation transform intact; do not clamp or rescale HUD elements.
+    ctx.save(); ctx.globalAlpha *= sideBlend; draw_game_cover(ctx, layout); ctx.restore();
     ctx.restore();
 };
 
@@ -3050,20 +3070,24 @@ const drawGameplayTransition = (ctx: CanvasRenderingContext2D, elapsed: number, 
     ctx.fillStyle = `rgba(0,0,0,${(1 - settings.brightness) * backdropAlpha / .7})`; ctx.fillRect(0, 0, width, height);
     const lineScale = ending ? (elapsed >= 1 && elapsed <= 1.7 ? (1.7 - elapsed) / .7 : 0)
         : originalUI.sample('Began', 'JudgeLine', 'm_ScaleCurves', elapsed, 1, 'x');
-    const lineVisible = elapsed < originalUI.duration('Began');
     if (ending && lineScale > 0) {
         const time = musicTime - C.chart.data.offset;
         render_scene(C.scene_cv.getContext('2d'), time, 'fg');
         ctx.save(); ctx.translate(width / 2, 0); ctx.scale(lineScale, 1);
         ctx.drawImage(C.scene_cv, -width / 2, 0); ctx.restore();
     }
-    if (!ending && originalUI.sample('Began', 'GameObjectCanvas', 'm_IsActive', elapsed, 0) > .5) {
-        render_scene(C.scene_cv.getContext('2d'), musicTime - C.chart.data.offset, 'fg');
-        ctx.drawImage(C.scene_cv, 0, 0);
-    }
-    if (!ending && lineVisible && lineScale > 0) {
-        ctx.fillStyle = settings.apFcIndicator ? '#ffffb4' : '#fff';
-        ctx.fillRect((width - 1.92 * height * lineScale) / 2, height / 2 - height * .00375, 1.92 * height * lineScale, height * .0075);
+    if (!ending) {
+        // Freeze the full chart at the upcoming playback position. The opening
+        // curve expands this entire foreground, including textures and notes;
+        // preview drawing never consumes judgements or starts hit feedback.
+        const time = musicTime - C.chart.data.offset + settings.offset / 1000;
+        const preview = C.openingPreview;
+        if (!preview || preview.chart !== C.chart || preview.time !== time || preview.width !== width || preview.height !== height || preview.settings !== settings) {
+            render_scene(C.scene_cv.getContext('2d'), time, 'fg', true);
+            C.openingPreview = { chart: C.chart, time, width, height, settings };
+        }
+        ctx.save(); ctx.translate(width / 2, 0); ctx.scale(lineScale, 1);
+        ctx.drawImage(C.scene_cv, -width / 2, 0); ctx.restore();
     }
     const scaleY = originalUI.sample(clip, '', 'm_ScaleCurves', elapsed, 1, 'y');
     const comboAlpha = originalUI.sample(clip, 'Canvas (1)/ComboText', 'm_Color.a', elapsed, 1);
@@ -3161,7 +3185,13 @@ const startMusic = () => {
 };
 
 const beginEntrance = (skipLoading: boolean) => {
-    C.entrance = { start: sceneNow(), skip: skipLoading, painted: false };
+    C.chart.music?.pause();
+    clock_run(false);
+    clear_block_input(true);
+    if (settings.autoplay) update_game_score(-Infinity);
+    C.game_hud.score = 0; C.game_hud.combo = 0;
+    C.openingPreview = null;
+    C.entrance = { start: sceneNow(), skip: skipLoading, painted: false, musicTime: clock_t() };
     transitionScene(skipLoading ? 'game-opening' : 'loading');
     ui.btn_play.textContent = skipLoading ? '开始中…' : '加载中…';
 };
@@ -3374,6 +3404,7 @@ const init_player = async () => {
             return;
         }
         if (C.scene !== 'game') return;
+        if (hudPointCovered(x, y, layout)) return;
         const button = layout.pause;
         const attachment = game_hud_attachment('pause', get_time() - C.chart.data.offset + settings.offset / 1000, layout);
         const point = inverseHudPoint(x, y, attachment, button.x, button.y);

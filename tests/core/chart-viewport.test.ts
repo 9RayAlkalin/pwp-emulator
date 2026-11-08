@@ -78,6 +78,16 @@ it('keeps pointer judgement and feedback aligned with note offsets inside a capp
   expect(hitEffectPosition(createHitEffect(note, 1, 'perfect'), 2000, 800)).toEqual([1225, 400]);
 });
 
+it.each([16 / 9, 1.5, 4 / 3])('keeps RPE Y offsets in height units at aspect %s', aspect => {
+  const vp = chartViewport(1920, 1080, aspect);
+  const note: RuntimeNote = { type: 1, time: 1, sect: 1, secht: 0, holdTime: 0, hold_end_time: 1,
+    positionX: 0, speed: 2, yOffset: 225 / 540, is_hold: false, is_above: true, clicked: false,
+    master: { get_state: () => [90, .5, .5, 1], get_viewport: () => vp } };
+  const position = hitEffectPosition(createHitEffect(note, 1, 'perfect'), 1920, 1080);
+  expect(position[0]).toBeCloseTo(1500);
+  expect(position[1]).toBeCloseTo(540);
+});
+
 it('uses the saved width-ratio override ahead of chart metadata, with zero restoring automatic mode', () => {
   expect(resolveChartAspect(1.5, 4 / 3)).toBe(4 / 3);
   expect(resolveChartAspect(1.5, 0)).toBe(1.5);

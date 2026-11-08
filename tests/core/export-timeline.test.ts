@@ -39,4 +39,13 @@ describe('offline scene timeline', () => {
     for (const level of ['EZ', 'HD', 'IN', 'AT']) expect(resultMusicFile(`${level} Lv.14`)).toBe(`/assets/audio/result/${level.toLowerCase()}.ogg`);
     expect(resultMusicFile('SP Lv.?')).toBe('/assets/audio/result/in.ogg');
   });
+
+  it('freezes chart playback position for every opening frame before releasing music and chart together', () => {
+    const plan=exportTimeline(12,20,{loading:true},1);
+    for(const elapsed of [0,.25,.75,1.05,1.499999]) {
+      const frame=exportFrame(plan,2.5+elapsed);
+      expect(frame.scene).toBe('game-opening');expect(frame.musicTime).toBe(12);
+    }
+    expect(exportFrame(plan,4)).toEqual({scene:'game',elapsed:0,musicTime:12});
+  });
 });

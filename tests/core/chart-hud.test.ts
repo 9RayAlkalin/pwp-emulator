@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { hudAttachment, inverseHudPoint } from '../../src/core/chart-hud';
+import { gameHudLayout, hudAttachment, hudPointCovered, inverseHudPoint } from '../../src/core/chart-hud';
 import { parseChart } from '../../src/library/importer';
 import { createLineStateResolver } from '../../src/core/chart-state';
 
@@ -26,4 +26,17 @@ it('maps a moved, rotated, stretched pause hitbox back into its local coordinate
   expect(inverseHudPoint(1, 2, { ...a, alpha: 0 }, 0, 0)).toBeUndefined();
   expect(inverseHudPoint(1, 2, { ...a, scaleX: 0 }, 0, 0)).toBeUndefined();
   expect(inverseHudPoint(1, 2, undefined, 0, 0)).toEqual([1, 2]);
+});
+
+it('rejects clicks on covered pause parts in screen space before undoing the attachUI transform', () => {
+  const layout = gameHudLayout(1600, 900, { left: 200, width: 1200 });
+  const y = layout.pause.y + layout.pause.height / 2;
+  const a = { dx: -layout.pause.width * 2, dy: 0, rotation: 0, scaleX: 4, scaleY: 1, alpha: 1 };
+  const hiddenX = layout.left - 1, visibleX = layout.left + 1;
+  expect(hudPointCovered(hiddenX, y, layout)).toBe(true);
+  expect(hudPointCovered(visibleX, y, layout)).toBe(false);
+  expect(hudPointCovered(layout.right, y, layout)).toBe(true);
+  expect(inverseHudPoint(hiddenX, y, a, layout.pause.x, layout.pause.y)).toBeDefined();
+  expect(hudPointCovered(0, y, gameHudLayout(1600, 900))).toBe(false);
+  expect(hudPointCovered(hiddenX, -1, layout)).toBe(false);
 });

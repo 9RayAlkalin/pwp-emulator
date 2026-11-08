@@ -22,6 +22,11 @@ export function gameHudLayout(w: number, h: number, bounds?: Pick<ChartViewport,
 }
 
 export interface HudAttachment { dx: number; dy: number; rotation: number; scaleX: number; scaleY: number; alpha: number; }
+export function hudPointCovered(x: number, y: number, layout: { height: number; cover: { left: number; right: number; width: number } }): boolean {
+  const { left, right, width } = layout.cover;
+  return left > 0 && y >= 0 && y < layout.height &&
+    (x >= left - width && x < left || x >= right && x < right + width);
+}
 export function hudAttachment(lines: ChartLine[], element: HudElement, time: number,
                               state: (line: ChartLine, time: number) => LineState, width: number, height: number): HudAttachment | undefined {
   let line: ChartLine | undefined;
