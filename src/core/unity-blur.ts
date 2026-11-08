@@ -7,7 +7,7 @@ export function shadowBlurConfig(strength: number): { radius: number; iteration:
   return { radius: scaled / ((3 << iteration) - 2), iteration };
 }
 
-let gpu: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext; program: WebGLProgram; step: WebGLUniformLocation } | null | undefined;
+let gpu: { canvas: HTMLCanvasElement; gl: WebGLRenderingContext; program: WebGLProgram; step: WebGLUniformLocation; vibrancy: WebGLUniformLocation; brightness: WebGLUniformLocation; tintSource?: HTMLCanvasElement; tintTexture?: WebGLTexture } | null | undefined;
 
 function blurGPU(source: HTMLCanvasElement, radius: number, iteration: number): HTMLCanvasElement | undefined {
   if (gpu === undefined) {
@@ -22,17 +22,18 @@ function blurGPU(source: HTMLCanvasElement, radius: number, iteration: number): 
       };
       const program = gl.createProgram()!;
       gl.attachShader(program, compile(gl.VERTEX_SHADER, 'attribute vec2 p; varying vec2 uv; void main(){uv=p*.5+.5;gl_Position=vec4(p,0.,1.);}'));
-      gl.attachShader(program, compile(gl.FRAGMENT_SHADER, 'precision mediump float;uniform sampler2D tex;uniform vec2 stepSize;varying vec2 uv;void main(){gl_FragColor=(texture2D(tex,uv+stepSize)+texture2D(tex,uv-stepSize)+texture2D(tex,uv+vec2(stepSize.x,-stepSize.y))+texture2D(tex,uv+vec2(-stepSize.x,stepSize.y)))*.25;}'));
+      gl.attachShader(program, compile(gl.FRAGMENT_SHADER, 'precision mediump float;uniform sampler2D tex;uniform vec2 stepSize;uniform float vibrancy,brightness;varying vec2 uv;void main(){vec4 c=(texture2D(tex,uv+stepSize)+texture2D(tex,uv-stepSize)+texture2D(tex,uv+vec2(stepSize.x,-stepSize.y))+texture2D(tex,uv+vec2(-stepSize.x,stepSize.y)))*.25;if(vibrancy!=1.||brightness!=0.){float gray=dot(c.rgb,vec3(.22,.707,.071));c.rgb=clamp(clamp(gray+vibrancy*(c.rgb-gray),0.,1.)+brightness,0.,1.);}gl_FragColor=c;}'));
       gl.linkProgram(program); gl.useProgram(program);
       const buffer = gl.createBuffer()!; gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
       gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
       const position = gl.getAttribLocation(program, 'p'); gl.enableVertexAttribArray(position); gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
-      gpu = { canvas, gl, program, step: gl.getUniformLocation(program, 'stepSize')! };
+      gpu = { canvas, gl, program, step: gl.getUniformLocation(program, 'stepSize')!, vibrancy: gl.getUniformLocation(program, 'vibrancy')!, brightness: gl.getUniformLocation(program, 'brightness')! };
     }
   }
   if (!gpu) return;
   const { canvas, gl, program, step } = gpu;
   canvas.width = source.width; canvas.height = source.height; gl.useProgram(program);
+  gl.uniform1f(gpu.vibrancy, 1); gl.uniform1f(gpu.brightness, 0);
   const textures = [gl.createTexture()!, gl.createTexture()!], framebuffer = gl.createFramebuffer()!;
   for (const texture of textures) {
     gl.bindTexture(gl.TEXTURE_2D, texture); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -56,6 +57,26 @@ function blurGPU(source: HTMLCanvasElement, radius: number, iteration: number): 
   output.getContext('2d')!.drawImage(canvas, 0, 0);
   textures.forEach(texture => gl.deleteTexture(texture)); gl.deleteFramebuffer(framebuffer);
   return output;
+}
+
+// UI/TranslucentImage compiled GLES: luminance, vibrancy, then additive brightness.
+export function translucentTint(source: HTMLCanvasElement, vibrancy: number, brightness: number): HTMLCanvasElement | undefined {
+  if (!gpu) return;
+  const { canvas, gl, program, step } = gpu;
+  if (canvas.width !== source.width || canvas.height !== source.height) { canvas.width = source.width; canvas.height = source.height; }
+  gl.useProgram(program);
+  if (gpu.tintSource !== source) {
+    if (gpu.tintTexture) gl.deleteTexture(gpu.tintTexture);
+    gpu.tintTexture = gl.createTexture()!; gpu.tintSource = source;
+    gl.bindTexture(gl.TEXTURE_2D, gpu.tintTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  } else gl.bindTexture(gl.TEXTURE_2D, gpu.tintTexture!);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.uniform2f(step, 0, 0); gl.uniform1f(gpu.vibrancy, vibrancy); gl.uniform1f(gpu.brightness, brightness);
+  gl.viewport(0, 0, source.width, source.height); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  const output = document.createElement('canvas'); output.width = source.width; output.height = source.height;
+  output.getContext('2d')!.drawImage(canvas, 0, 0); return output;
 }
 
 export function efficientBlur(source: HTMLCanvasElement, radius: number, iteration: number): HTMLCanvasElement {

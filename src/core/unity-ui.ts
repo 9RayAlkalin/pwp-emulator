@@ -1,7 +1,8 @@
 import type { ChartInfo, Settings, Statistics } from '../types';
 import { resultGrade } from './result-records';
-import { efficientBlur, shadowBlurConfig } from './unity-blur';
+import { efficientBlur, shadowBlurConfig, translucentTint } from './unity-blur';
 import { avatarId, parseTips, type AvatarEntry } from './profile-assets';
+import { fakeSyncFrame, type SyncFrame } from './result-sync';
 
 type Vector = { x: number; y: number; z?: number; w?: number };
 type Data = Record<string, any>;
@@ -15,7 +16,7 @@ interface Export { scenes: Record<string, Scene>; clips: Record<string, Clip>; t
 export interface SceneView {
   info: ChartInfo; image?: CanvasImageSource; background?: CanvasImageSource; frame?: CanvasImageSource;
   settings: Settings; stats: Statistics & { early?: number; late?: number }; elapsed: number;
-  sync?: boolean; collection?: boolean; previousBest?: number; resume?: boolean; showName?: boolean;
+  collection?: boolean; previousBest?: number; resume?: boolean; showName?: boolean;
   fadeTime?: number;
   loadingTime?: number;
   tip?: string;
@@ -68,6 +69,10 @@ export class UnityUI {
       const ctx = image.getContext('2d')!;
       this.blurredFrame = { source, image, pixels: ctx.getImageData(0, 0, image.width, image.height).data };
     }
+    const filtered = translucentTint(this.blurredFrame!.image, vibrancy, brightness);
+    if (filtered) {
+      this.filteredFrame = { source, vibrancy, brightness, image: filtered }; return filtered;
+    }
     const base = this.blurredFrame!, image = document.createElement('canvas'); image.width = base.image.width; image.height = base.image.height;
     const ctx = image.getContext('2d')!, pixels = ctx.createImageData(image.width, image.height);
     for (let i = 0; i < pixels.data.length; i += 4) {
@@ -116,6 +121,13 @@ export class UnityUI {
   }
 
   duration(name: string): number { return this.data?.clips[name]?.duration || 0; }
+
+  syncFrame(elapsed: number): SyncFrame {
+    return fakeSyncFrame(elapsed, {
+      delay: this.data.scenes.result.bindings.AutoSyncControl.animOffset,
+      show: this.duration('SyncShow'), loop: this.duration('Sync'), success: this.duration('SyncSuccess'),
+    });
+  }
 
   sample(name: string, path: string | null, attribute: string, time: number, fallback: number, axis?: keyof Vector): number {
     const track = this.data?.clips[name]?.tracks.find(t => (path === null || t.path === path) && t.attribute === attribute);
@@ -210,7 +222,7 @@ export class UnityUI {
       for (const [index, id] of profile.rankBackgrounds.entries()) if (index === tier) enabled.add(String(id)); else hidden.add(String(id));
       if (view.settings.playerChallengeModeRank === 0) hidden.add('89');
       else enabled.add('89');
-      const avatar = this.images.get('profile-' + avatarId(view.settings.playerAvatar));
+      const avatar = this.images.get('profile-' + avatarId(view.settings.playerAvatar)) || this.images.get('profile-OblivionPHIN');
       if (avatar) dynamicImages.set('100', avatar);
       // PlayerBarControl.Start @ 0x1d8c4c8: shift the name slider by -55-preferredWidth.
       const font = scene.nodes['94'].components.find(c => c.font)?.font!;
@@ -218,10 +230,26 @@ export class UnityUI {
       // playerIdSlider points to RectTransform 287 (Image node 92), not its parent Slider.
       const slider = Object.values(scene.nodes).find(node => node.transformId === profile.playerIdSlider.fileID)!;
       patch(slider.id, { 'm_AnchoredPosition.x': view.showName === false ? 0 : -55 - ctx.measureText(view.settings.playerName).width });
-      texts.set(330, view.sync ? '已同步' : '同步中');
-      patch('45', { 'm_SizeDelta.x': 90 });
-      patch('15', { 'm_Color.a': 1 });
-      hidden.add('82'); // Fake sync resolves locally; no cloud request.
+      const sync = this.syncFrame(time), syncBindings = scene.bindings.AutoSyncControl;
+      const syncRoot = Object.values(scene.nodes).find(node => node.components.some(component => component.id === syncBindings.animator.fileID))!;
+      const progress = Object.values(scene.nodes).find(node => node.components.some(component => component.id === syncBindings.syncTextDisplay.fileID))!;
+      const result = Object.values(scene.nodes).find(node => node.components.some(component => component.id === syncBindings.syncResult.fileID))!;
+      texts.set(syncBindings.syncTextSize.fileID, '同步中'); texts.set(syncBindings.syncTextDisplay.fileID, '同步中'); texts.set(syncBindings.syncResult.fileID, '已同步');
+      const syncFont = syncRoot.components.find(component => component.id === syncBindings.syncTextSize.fileID)!.font!;
+      ctx.font = `${syncFont.m_FontSize}px PhiHUD`;
+      patch(syncRoot.id, { 'm_SizeDelta.x': ctx.measureText('同步中').width });
+      if (sync.phase === 'waiting' || sync.phase === 'hidden') hidden.add(syncRoot.id);
+      else {
+        // Animator transitions restore the children disabled by the initial SyncHide state.
+        for (const id of syncRoot.children) patch(id, { m_IsActive: 1 });
+        patch(result.id, { 'm_Color.a': 0 });
+        patch(progress.parent!, { m_Alpha: 0 });
+        for (const [id, values] of this.animate(scene, sync.clip, syncRoot.path, sync.time)) patch(id, values);
+        if (sync.loopTime !== null) {
+          const indicator = Object.values(scene.nodes).find(node => node.components.some(component => component.clips?.includes('Sync')))!;
+          for (const [id, values] of this.animate(scene, 'Sync', indicator.path, sync.loopTime)) patch(id, values);
+        }
+      }
       if (!view.collection) hidden.add('57');
       else { enabled.add('57'); enabled.add('22'); for (const id of ['12', '46', '70']) hidden.add(id); texts.set(357, '1.00 MB'); texts.set(311, '已获得'); }
       for (const id of ['54', '20']) this.canvas(ctx, scene, id, patches, texts, dynamicImages, hidden, enabled, view, id === '54' ? (canvasWidth / canvasHeight >= 1.7778 ? .5 : 0) : .6);
@@ -293,9 +321,12 @@ export class UnityUI {
       const amount = patch.m_FillAmount ?? graphic.data.m_FillAmount, origin = patch.m_FillOrigin ?? graphic.data.m_FillOrigin;
       ctx.beginPath(); ctx.rect(-pivot.x * size.x + (origin >= .5 ? size.x * (1 - amount) : 0), -pivot.y * size.y, size.x * amount, size.y); ctx.clip();
     }
-    if (graphic) {
+    // A stencil mask's white caster is fully covered by its image in Unity.
+    // Filling it again under an antialiased Canvas clip exposes a white fringe.
+    const coveredMask = mask && node.children.some(child => images.has(child));
+    if (graphic && (!mask || mask.data.m_ShowMaskGraphic && !coveredMask)) {
       const data = graphic.data, tint = { ...(data.m_Color || white) };
-      tint.a = patch['m_Color.a'] ?? patch['color.a'] ?? tint.a;
+      for (const channel of ['r', 'g', 'b', 'a']) tint[channel] = patch['m_Color.' + channel] ?? patch['color.' + channel] ?? tint[channel];
       ctx.save(); ctx.globalAlpha *= tint.a;
       const x = -pivot.x * size.x, y = -pivot.y * size.y;
       const dynamic = images.get(id), image = dynamic || this.sprite(graphic, tint);

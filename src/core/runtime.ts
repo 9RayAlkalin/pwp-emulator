@@ -95,7 +95,6 @@ const C: any = {
     loadingTip: '',
     resultImage: null,
     resultStats: null,
-    resultSync: 'syncing',
     resultCollection: false,
     resultStarted: 0,
     gameOverAt: 0,
@@ -159,9 +158,7 @@ const transitionScene = (to: string) => {
     if (to === 'result') {
         C.resultStarted = sceneNow();
         C.previousBest = recordResult(C.chart.dir || C.chart.info.name, C.resultStats?.score || 0);
-        C.resultSync = 'syncing';
         C.resultCollection = false;
-        window.setTimeout(() => { if (C.scene === 'result') C.resultSync = 'done'; }, 2000);
         window.setTimeout(() => {
             if (C.scene === 'result' && Number(C.resultStats?.score || 0) >= 880000) C.resultCollection = true;
         }, 2000);
@@ -3302,7 +3299,7 @@ const drawSceneOverlay = (ctx: CanvasRenderingContext2D) => {
         settings,
         stats: C.resultStats || simulator.snapshot().stats,
         elapsed,
-        sync: C.resultSync === 'done', collection: C.resultCollection,
+        collection: C.resultCollection,
         previousBest: C.previousBest || 0,
         showName: settings.playerShowName,
         tip: C.loadingTip,
@@ -3740,7 +3737,7 @@ export const simulator = {
         const modeChanged = settings.autoplay !== value.autoplay;
         const speedChanged = settings.speed !== value.speed;
         settings = { ...value };
-        void originalUI.loadAvatar(settings.playerAvatar).catch(error => {
+        const profileReady = originalUI.loadAvatar(settings.playerAvatar).catch(error => {
             events.dispatchEvent(new CustomEvent('error', { detail: `无法载入头像：${error.message}` }));
         });
         if (speedChanged && C.chart.data) rebuild_click_effects();
@@ -3748,6 +3745,7 @@ export const simulator = {
         if (C.chart.music) { C.chart.music.playbackRate = settings.speed; C.chart.music.volume = settings.volume; }
         C.postfx_enabled = settings.effects;
         if (modeChanged && C.chart.data) seek(0);
+        return profileReady;
     },
     updateInfo(patch: Partial<ChartInfo>): boolean {
         if (!C.chart.data || lib_loading || C.video_export_active) return false;
