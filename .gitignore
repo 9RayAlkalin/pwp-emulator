@@ -2,6 +2,5 @@
 /assets/library
 /node_modules
 /dist
-/tests
 /verification-edge-profile
 *.tsbuildinfo
