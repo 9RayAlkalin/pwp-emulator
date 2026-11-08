@@ -112,7 +112,9 @@ export class UnityUI {
       const entry = this.avatarEntries.find(entry => entry.id === id);
       if (!entry) return;
       pending = (async () => {
-        const image = new Image(); image.src = this.assetPath('/assets/avatars/' + encodeURIComponent(entry.file));
+        // Keep literal '+' in the pathname so Vite's static resolver preserves it.
+        const file = encodeURIComponent(entry.file).replace(/%2B/g, '+');
+        const image = new Image(); image.src = this.assetPath('/assets/avatars/' + file);
         await image.decode(); this.images.set('profile-' + id, image);
       })();
       this.avatarRequests.set(id, pending);
