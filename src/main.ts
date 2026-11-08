@@ -43,6 +43,8 @@ function syncSettings(): void {
     const output = input.parentElement?.querySelector('output');
     if (output) output.textContent = `${Math.round(Number(settings[key]) * 100)}%`;
   }
+  $('collection-data-options').hidden = settings.collectionType !== 'data';
+  $('collection-item-options').hidden = settings.collectionType === 'data';
 }
 function renderLibrary(): void {
   const query = $<HTMLInputElement>('search').value.trim().toLocaleLowerCase();
@@ -75,7 +77,7 @@ async function loadSelected(): Promise<void> {
     $('player').hidden = false;
     for (const id of ['btn-restart', 'btn-fullscreen', 'btn-export']) $<HTMLButtonElement>(id).disabled = false;
     simulator.configure(settings);
-    status('');
+    status(localCharts.get(entry.path)?.data.warnings?.join('；') || '');
   } catch (error) { status(`载入失败：${error instanceof Error ? error.message : error}`); }
   finally { setBusy(false); $('loading-overlay').hidden = true; }
 }
@@ -93,7 +95,8 @@ async function importSelection(files: File[]): Promise<void> {
     $<HTMLSelectElement>('filter').value = 'LOCAL';
     $<HTMLInputElement>('search').value = '';
     renderLibrary();
-    status(`已导入 ${imported.length} 张谱面，选择后点击加载。`);
+    const warnings = [...new Set(imported.flatMap(chart => chart.data.warnings ?? []))];
+    status(`已导入 ${imported.length} 张谱面，选择后点击加载。${warnings.length ? `兼容提示：${warnings.join('；')}` : ''}`);
   } catch (error) { status(error instanceof Error ? error.message : String(error)); }
   finally {
     setBusy(false); renderLibrary(); $<HTMLInputElement>('file-input').value = '';

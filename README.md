@@ -14,14 +14,14 @@ pnpm dev
 功能：
 
 - 原生控件单页界面，使用原生选谱下拉框、Autoplay 复选框、搜索和折叠设置；始终提供内置 True Home, True World 演示。
-- 通过文件选择或拖放导入 ZIP，或同时选择 JSON 谱面、音频与可选曲绘。支持 Phigros v1/v3 JSON；暂不支持 PEC、RPE。
-- 支持 `info.csv` 的 Chart、Music、Image、Name、Level、Composer、Charter 字段，或同目录的 `info.json`。一首音乐可供多张谱面共享，多首音乐时需要明确填写对应关系。
+- 通过文件选择或拖放导入 PEZ / ZIP，或同时选择谱面、音频与可选曲绘。支持 Phigros v1/v3 JSON、PEC 和 RPE，按内容识别格式；支持变 BPM、分离 XY、分层事件、缓动、父子线、假音符及基本文字/颜色/缩放事件。适配范围见 [谱面导入说明](docs/chart-adapters.md)。
+- 支持 `info.yml` / `info.yaml`、`info.txt`、`info.csv`、`info.json`，以及 RPE `META`；`info.txt` 支持 `Name`、`Song`、`Picture`、`Chart`、`Level`、`Composer`、`Charter`、`Illustrator`。一首音乐可供多张谱面共享，多首音乐时需要明确填写对应关系。
 - Autoplay 与手动 Tap / Drag / Hold / Flick 判定，多点触控、鼠标、键盘输入，分数、连击、准确率与结算；手动、Autoplay 和视频导出共用打击序列帧与粒子，Perfect 金色、Good 蓝色。
 - 手动触摸生效方块会锁定该手指至松开，并触发触摸光晕和音乐低通；支持移动/旋转方块、减算区域及多指，暂停与跳转会清理状态。规则与还原范围见 [Block 接触说明](docs/block-touch.md)。
 - 0.5–2 倍速、时间轴跳转、重开、偏移、音量、音符大小、背景亮度、全屏与特效开关。设置保存在浏览器；导入谱面只保留在当前页面会话。
 - Canvas 2D 绘制谱面与 HUD，字体按最终像素栅格化并适配高 DPI；WebGL/WebGL2 执行后期特效；无法使用 WebGL 时降级绘制。
 - Loading、暂停和结算使用恢复的 Unity 场景与动画；玩家资料在 HTML 设置中编辑，头像列表自动读取 `assets/avatars/`，loading 提示读取 `assets/tips.txt`。
-- WebCodecs 离线导出 WebM（VP9/VP8，音乐音轨使用 Opus，需浏览器支持）。导出使用自动演奏、原始 1× 音轨，音轨不包含打击音。
+- 浏览器离线渲染：FFmpeg.wasm 导出 H.264、HEVC、ProRes 或 FFV1；WebCodecs 可请求硬件编码。支持 MP4、MKV、MOV、WebM、Loading / Result、结算 BGM 和自定义收藏品。导出使用自动演奏、原始 1× 音轨，音轨不包含打击音。参数、静态部署多线程和限制见 [视频导出](docs/video-export.md)。
 
 快捷键：空格播放/暂停，左右方向键跳转 2 秒，B 切换控制栏，L 定位选谱，V 打开视频导出。手动键位为 A/S/D/F 和 J/K/N/M；按键采用全屏判定，指针按判定线位置判定。Hold 需持续按住，Flick 通过滑动或按键触发。
 
@@ -34,7 +34,10 @@ pnpm dev
 ```text
 src/main.ts             应用界面、谱面库与设置交互
 src/types.ts            谱面、设置、判定与统计类型
-src/library/importer.ts ZIP / JSON / CSV 解析、资源匹配与校验
+src/library/importer.ts PEZ / ZIP / 松散文件导入、资源匹配与校验
+src/library/adapters/   PEC / RPE 格式适配、变 BPM 与事件换算
+src/library/metadata.ts info.yml / info.txt / info.json 元数据解析
+src/core/chart-state.ts 适配谱面的分层事件、父子线与文字状态
 src/core/runtime.ts     Canvas / WebGL 特效、场景流程及导出管线
 src/core/timeline.ts    时间轴、判定线事件与坐标计算
 src/core/judge.ts       手动判定、Hold 跟踪、计分与反馈事件
@@ -55,3 +58,4 @@ tests/                  判定、导入及场景动画的回归测试
 ## License
 本仓库中由我编写的代码采用 Unlicense 发布，进入公共领域。
 第三方资源（如 Phigros 相关素材、音乐、谱面等）版权归各自所有者，不适用本许可。
+FFmpeg 依赖保留 MIT / GPL-2.0-or-later 等上游许可，声明见 [third-party/ffmpeg](third-party/ffmpeg/README.md)。

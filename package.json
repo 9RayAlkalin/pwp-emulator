@@ -12,7 +12,12 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0"
   },
-  "dependencies": { "jszip": "^3.10.1" },
+  "dependencies": {
+    "@ffmpeg/core": "0.12.10",
+    "@ffmpeg/core-mt": "0.12.10",
+    "@ffmpeg/ffmpeg": "0.12.15",
+    "jszip": "^3.10.1"
+  },
   "devDependencies": {
     "@types/node": "^22.15.0",
     "typescript": "^5.8.3",

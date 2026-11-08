@@ -37,7 +37,7 @@ export class Judge {
     return { perfect: 0, good: 0, bad: 0, miss: 0, combo: 0, maxCombo: 0, score: 0, accuracy: 100, total: 0 };
   }
   reset(notes: RuntimeNote[], time = -Infinity): void {
-    this.notes = [...notes].sort((a, b) => a.sect - b.sect);
+    this.notes = notes.filter(note => !note.isFake).sort((a, b) => a.sect - b.sect);
     this.results.clear();
     this.contacts.clear();
     this.effects = [];
@@ -46,9 +46,9 @@ export class Judge {
     this.armed.clear();
     this.lastFrameTime = undefined;
     this.stats = this.empty();
-    this.stats.total = notes.length;
+    this.stats.total = this.notes.length;
     // Seeking is practice: skipped notes receive no points and cannot be hit again.
-    for (const note of notes) {
+    for (const note of this.notes) {
       note.clicked = false;
       if (note.sect < time) { this.results.set(note, { grade: 'miss', time }); this.stats.miss++; }
     }
@@ -66,7 +66,7 @@ export class Judge {
     const [x, y, angle] = this.position(note, time);
     // Judge along the line; a rotating line uses its local X axis.
     const radius = note.type === 2 || note.type === 4 ? 0.21 : 0.19;
-    return Math.abs((contact.x - x) * Math.cos(angle) + (contact.y - y) * Math.sin(angle)) < this.height * radius;
+    return Math.abs((contact.x - x) * Math.cos(angle) + (contact.y - y) * Math.sin(angle)) < this.height * radius * (note.judgeArea ?? 1);
   }
   input(id: string, x: number, y: number, kind: 'tap' | 'move' | 'release', time: number, width: number, height: number, keyboard: boolean): void {
     this.width = width;

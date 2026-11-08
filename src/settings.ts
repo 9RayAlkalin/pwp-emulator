@@ -7,6 +7,7 @@ export const defaults: Settings = {
   playerName: '9RayAlkalin', playerId: '00000000', playerAvatar: 'OblivionPHIN', playerRks: 16.08, playerChallengeModeRank: 48,
   playerChallengeModeTier: 3, playerShowName: true,
   skipLoadingAnimation: false,
+  collectionDisplay: 'auto', collectionType: 'data', collectionAmount: 1, collectionName: '',
 };
 export function loadSettings(): Settings {
   try {
@@ -25,6 +26,10 @@ export function loadSettings(): Settings {
     result.playerAvatar = avatarId(result.playerAvatar);
     result.playerChallengeModeRank = Math.round(Math.min(99, Math.max(0, result.playerChallengeModeRank)));
     result.playerChallengeModeTier = Math.round(Math.min(5, Math.max(0, result.playerChallengeModeTier)));
+    if (!['auto', 'always', 'never'].includes(result.collectionDisplay)) result.collectionDisplay = defaults.collectionDisplay;
+    if (!['data', 'avatar', 'illustration', 'file'].includes(result.collectionType)) result.collectionType = defaults.collectionType;
+    result.collectionAmount = Math.min(1000000, Math.max(0, result.collectionAmount));
+    result.collectionName = result.collectionName.trim().slice(0, 12);
     return result;
   } catch { return { ...defaults }; }
 }

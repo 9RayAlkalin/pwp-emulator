@@ -23,6 +23,7 @@ export function activeHitEffects(effects: readonly HitEffect[], time: number, sp
 }
 
 export function holdEffectInterval(note: RuntimeNote): number {
+  if (note.holdInterval !== undefined) return note.holdInterval;
   const bpm = note.master.bpm;
   return Number.isFinite(bpm) && bpm! > 0 ? 30 / bpm! : 0.25;
 }
@@ -46,12 +47,15 @@ export function hitEffectPosition(effect: HitEffect, width: number, height: numb
   const angle = rotation * Math.PI / 180;
   const offset = effect.note.positionX * 0.05625 * width;
   let px = x * width + offset * Math.cos(angle), py = y * height + offset * Math.sin(angle);
+  const yOffset = (effect.note.yOffset ?? 0) * effect.note.speed * .6 * height;
+  const normalAngle = angle + (effect.note.is_above ? -Math.PI / 2 : Math.PI / 2);
+  px += Math.cos(normalAngle) * yOffset; py += Math.sin(normalAngle) * yOffset;
   const line = effect.note.master as RuntimeNote['master'] & { speedEvents?: Parameters<typeof get_fp>[1]; sec2beat?: (time: number) => number };
   // Hold.Judge uses the current Hold transform for its first feedback. An early
   // Hold is still above/below the line; Click.Judge explicitly snaps its head.
   if (effect.note.is_hold && effect.time < effect.note.sect && line.speedEvents && line.sec2beat && line.bpm) {
     const distance = ((effect.note.floorPosition ?? 0) - get_fp(line.sec2beat(effect.time), line.speedEvents)) *
-      0.6 * (60 / 32 / line.bpm) * height;
+      0.6 * (60 / 32 / line.bpm) * height * ((line as any).animation ? effect.note.speed : 1);
     const normal = angle + (effect.note.is_above ? -Math.PI / 2 : Math.PI / 2);
     px += Math.cos(normal) * distance; py += Math.sin(normal) * distance;
   }

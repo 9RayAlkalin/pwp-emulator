@@ -3,6 +3,7 @@ import { resultGrade } from './result-records';
 import { efficientBlur, shadowBlurConfig, translucentTint } from './unity-blur';
 import { avatarId, parseTips, type AvatarEntry } from './profile-assets';
 import { fakeSyncFrame, type SyncFrame } from './result-sync';
+import { collectionReward, collectionVisible } from './result-collection';
 
 type Vector = { x: number; y: number; z?: number; w?: number };
 type Data = Record<string, any>;
@@ -252,8 +253,16 @@ export class UnityUI {
           for (const [id, values] of this.animate(scene, 'Sync', indicator.path, sync.loopTime)) patch(id, values);
         }
       }
-      if (!view.collection) hidden.add('57');
-      else { enabled.add('57'); enabled.add('22'); for (const id of ['12', '46', '70']) hidden.add(id); texts.set(357, '1.00 MB'); texts.set(311, '已获得'); }
+      const collection = String(bindings.collectedTip.fileID);
+      if (!collectionVisible(view.settings, !!view.collection, time)) hidden.add(collection);
+      else {
+        const reward = collectionReward(view.settings);
+        enabled.add(collection);
+        for (const [index, id] of bindings.collectedImage.entries()) {
+          if (index === reward.index) enabled.add(String(id)); else hidden.add(String(id));
+        }
+        texts.set(bindings.collectedText.fileID, reward.text); texts.set(311, '已获得');
+      }
       for (const id of ['54', '20']) this.canvas(ctx, scene, id, patches, texts, dynamicImages, hidden, enabled, view, id === '54' ? (canvasWidth / canvasHeight >= 1.7778 ? .5 : 0) : .6);
     } else if (name === 'loading') {
       patch('34', { 'm_IsActive': 1 }); enabled.add('34');

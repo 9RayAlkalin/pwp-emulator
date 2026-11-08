@@ -3,6 +3,7 @@
 | 目录 | 内容 |
 | --- | --- |
 | `audio/` | Tap、Drag、Flick 打击音 |
+| `audio/result/` | 原版 EZ、HD、IN、AT 四套循环结算音乐 |
 | `avatars/` | 完整头像，保留原文件名；开发启动和构建时自动生成 `index.json` |
 | `backgrounds/` | 原版预模糊背景和谱面映射 |
 | `builtin/s6/` | 随项目提供的 True Home, True World 谱面 |
@@ -14,7 +15,7 @@
 | `hud/` | 暂停/进度图标和字距数据 |
 | `library/` | 导入谱面、音乐和曲绘 |
 | `shaders/` | WebGL 着色器 |
-| `ui/` | 原始 Unity UI 层级、曲线及引用的 Sprite 纹理 |
+| `ui/` | 原始 Unity UI 层级、曲线及按用途命名的 Sprite 纹理，命名说明见 `ui/README.md` |
 
 `tips.txt` 每个非空行是一条 loading 提示，按原文绘制到 Canvas。每次开始随机选择一条。
 

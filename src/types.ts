@@ -9,7 +9,34 @@ export interface ChartEvent {
   end2?: number;
   value?: number;
   floorPosition?: number;
+  floorOrigin?: number;
+  endValue?: number;
+  easing?: ChartEasing;
   [key: string]: unknown;
+}
+export interface ChartEasing {
+  type: number;
+  left?: number;
+  right?: number;
+  bezier?: number[];
+  from?: number;
+  to?: number;
+}
+export interface LineAnimation {
+  // Adapter tracks use seconds, normalized XY offsets from the screen centre,
+  // and clockwise degrees. Layers add; extended properties do not.
+  x: ChartEvent[][];
+  y: ChartEvent[][];
+  rotation: ChartEvent[][];
+  alpha: ChartEvent[][];
+  scaleX?: ChartEvent[];
+  scaleY?: ChartEvent[];
+  color?: ChartEvent[][];
+  text?: { startTime: number; endTime: number; start: string; end: string; easing?: ChartEasing }[];
+  father?: number;
+  rotateWithFather?: boolean;
+  cover: boolean;
+  zOrder: number;
 }
 export interface ChartNote {
   type: NoteType;
@@ -18,6 +45,13 @@ export interface ChartNote {
   positionX: number;
   speed: number;
   floorPosition?: number;
+  isFake?: boolean;
+  size?: number;
+  alpha?: number;
+  visibleTime?: number;
+  yOffset?: number;
+  judgeArea?: number;
+  holdInterval?: number;
 }
 export interface ChartLine {
   bpm: number;
@@ -27,11 +61,14 @@ export interface ChartLine {
   judgeLineMoveEvents: ChartEvent[];
   judgeLineRotateEvents: ChartEvent[];
   judgeLineDisappearEvents: ChartEvent[];
+  animation?: LineAnimation;
 }
 export interface ChartData {
   formatVersion: number;
   offset: number;
   judgeLineList: ChartLine[];
+  sourceFormat?: 'phigros' | 'pec' | 'rpe';
+  warnings?: string[];
   [key: string]: unknown;
 }
 export interface ChartInfo {
@@ -102,4 +139,8 @@ export interface Settings {
   playerChallengeModeRank: number;
   playerChallengeModeTier: number;
   playerShowName: boolean;
+  collectionDisplay: 'auto' | 'always' | 'never';
+  collectionType: 'data' | 'avatar' | 'illustration' | 'file';
+  collectionAmount: number;
+  collectionName: string;
 }

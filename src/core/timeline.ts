@@ -1,4 +1,5 @@
 import type { ChartEvent, ChartNote } from '../types';
+import { easingProgress } from './chart-easing';
 
 export function linear(t: number, start: number, end: number, from: number, to: number): number {
   return end === start ? to : from + (t - start) / (end - start) * (to - from);
@@ -13,23 +14,31 @@ export function find_event(time: number, events: ChartEvent[]): number {
   return result;
 }
 export function init_speed_events(events: ChartEvent[]): void {
-  let floor = 0;
+  let floor = -Number(events[0]?.floorOrigin ?? 0);
   for (const event of events) {
     event.floorPosition = floor;
-    floor += (event.endTime - event.startTime) * (event.value ?? 0);
+    floor += (event.endTime - event.startTime) * ((event.value ?? 0) + (event.endValue ?? event.value ?? 0)) / 2;
   }
 }
 export function get_fp(time: number, events: ChartEvent[]): number {
   const index = find_event(time, events);
   if (index < 0) return 0;
   const event = events[index];
-  return (event.floorPosition ?? 0) + (time - event.startTime) * (event.value ?? 0);
+  const dt = time - event.startTime;
+  const acceleration = event.endTime === event.startTime ? 0 : ((event.endValue ?? event.value ?? 0) - (event.value ?? 0)) / (event.endTime - event.startTime);
+  return (event.floorPosition ?? 0) + dt * (event.value ?? 0) + acceleration * dt * dt / 2;
 }
 export function get_event_val(time: number, events: ChartEvent[], from: string, to: string): number {
   const index = find_event(time, events);
   if (index < 0) return 0;
   const event = events[index];
-  return linear(time, event.startTime, event.endTime, Number(event[from] ?? 0), Number(event[to] ?? 0));
+  return eventValue(time, event, from, to);
+}
+export function eventValue(time: number, event: ChartEvent, from = 'start', to = 'end'): number {
+  const a = Number(event[from] ?? 0), b = Number(event[to] ?? 0);
+  if (!event.easing) return linear(time, event.startTime, event.endTime, a, b);
+  const p = event.endTime === event.startTime ? 1 : (time - event.startTime) / (event.endTime - event.startTime);
+  return a + (b - a) * easingProgress(p, event.easing);
 }
 export function merge_notes(above: ChartNote[], below: ChartNote[]) {
   return [...above.map(note => Object.assign(note, { is_above: true })), ...below.map(note => Object.assign(note, { is_above: false }))];

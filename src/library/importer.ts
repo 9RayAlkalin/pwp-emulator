@@ -1,17 +1,28 @@
 import JSZip from 'jszip';
-import type { ChartData, ChartInfo, LocalChart } from '../types';
+import type { ChartData, LocalChart } from '../types';
+import { parsePec } from './adapters/pec';
+import { parseRpe } from './adapters/rpe';
+import { metadataFields, parseInfoText, parseInfoYaml, type MetadataFields } from './metadata';
 
-interface Asset { name: string; blob: Blob; }
+interface Asset { name: string; blob: Blob; group: number; }
 const filename = (path: string) => path.replaceAll('\\', '/').split('/').pop() || path;
 const parent = (path: string) => path.slice(0, path.lastIndexOf('/') + 1);
 
-export function parseChart(value: unknown): ChartData {
+export function parseChart(value: unknown, format?: string): ChartData {
+  const hint = format?.trim().toLowerCase();
+  if (hint && !['pec', 'rpe', 'phi', 'phigros'].includes(hint)) throw new Error(`暂不支持谱面格式 ${format}`);
+  if (typeof value === 'string') {
+    const text = value.replace(/^\uFEFF/, '').trim();
+    if (hint === 'pec' || (!hint && !text.startsWith('{'))) return parsePec(text);
+    try { value = JSON.parse(text); } catch { throw new Error('谱面 JSON 解析失败'); }
+  }
+  if (hint === 'rpe' || (!hint && value && typeof value === 'object' && ('BPMList' in value || 'META' in value))) return parseRpe(value);
+  if (hint === 'pec') throw new Error('PEC 谱面必须为文本');
   if (!value || typeof value !== 'object') throw new Error('谱面必须为 JSON 对象');
   const chart = structuredClone(value) as ChartData;
   if (![1, 3].includes(chart.formatVersion)) throw new Error(`暂不支持谱面版本 ${chart.formatVersion}，请使用 Phigros v1/v3 JSON`);
   if (!Array.isArray(chart.judgeLineList) || !chart.judgeLineList.length) throw new Error('谱面缺少 judgeLineList');
   if (!Number.isFinite(chart.offset)) chart.offset = 0;
-  let count = 0;
   for (const line of chart.judgeLineList) {
     if (!Number.isFinite(line.bpm) || line.bpm <= 0) throw new Error('判定线 BPM 必须大于零');
     for (const key of ['speedEvents', 'judgeLineMoveEvents', 'judgeLineRotateEvents', 'judgeLineDisappearEvents'] as const) {
@@ -34,12 +45,11 @@ export function parseChart(value: unknown): ChartData {
         if (![1, 2, 3, 4].includes(note.type) || !Number.isFinite(note.time) || !Number.isFinite(note.positionX) || !Number.isFinite(note.speed)) throw new Error('谱面包含无效音符');
         if (!Number.isFinite(note.holdTime)) note.holdTime = 0;
         if (note.holdTime < 0) throw new Error('Hold 时长不能为负数');
-        count++;
       }
     }
   }
-  if (count > 200000) throw new Error('谱面音符过多（最多 200000）');
   chart.formatVersion = 3;
+  chart.sourceFormat ??= 'phigros';
   return chart;
 }
 
@@ -60,60 +70,119 @@ function csvRows(text: string): Record<string, string>[] {
 
 export async function importFiles(files: File[], progress: (text: string) => void): Promise<LocalChart[]> {
   const assets: Asset[] = [];
-  let total = 0;
+  let group = 0;
   for (const file of files) {
-    if (/\.zip$/i.test(file.name)) {
+    if (/\.(pez|zip)$/i.test(file.name)) {
       progress(`解压 ${file.name}`);
       const zip = await JSZip.loadAsync(file);
+      const archive = ++group;
       for (const entry of Object.values(zip.files)) {
         if (entry.dir || /(^|\/)__MACOSX\//.test(entry.name)) continue;
-        if (!/\.(json|csv|ogg|mp3|wav|m4a|flac|png|jpe?g|webp)$/i.test(entry.name)) continue;
         const blob = await entry.async('blob');
-        total += blob.size;
-        if (total > 512 * 1024 * 1024) throw new Error('导入资源总量超过 512 MB');
-        assets.push({ name: entry.name, blob });
+        assets.push({ name: normalizePath(entry.name), blob, group: archive });
       }
-    } else { total += file.size; assets.push({ name: file.webkitRelativePath || file.name, blob: file }); }
+    } else assets.push({ name: normalizePath(file.webkitRelativePath || file.name), blob: file, group: 0 });
   }
-  if (total > 512 * 1024 * 1024) throw new Error('导入资源总量超过 512 MB');
   const audio = assets.filter(asset => /\.(ogg|mp3|wav|m4a|flac)$/i.test(asset.name));
   const images = assets.filter(asset => /\.(png|jpe?g|webp)$/i.test(asset.name));
-  const metadata: Record<string, string>[] = [];
-  for (const asset of assets.filter(asset => /(?:^|\/)info\.csv$/i.test(asset.name))) metadata.push(...csvRows(await asset.blob.text()));
-  const parsed = new Map<string, unknown>();
-  for (const asset of assets.filter(asset => /\.json$/i.test(asset.name))) {
-    try { parsed.set(asset.name, JSON.parse(await asset.blob.text())); }
-    catch { throw new Error(`JSON 解析失败：${asset.name}`); }
+  const metadata: { fields: MetadataFields; dir: string; group: number; priority: number }[] = [];
+  const parsed = new Map<Asset, unknown>(), texts = new Map<Asset, string>();
+  for (const asset of assets.filter(asset => /(?:^|\/)info\.(?:csv|json|txt|ya?ml)$/i.test(asset.name))) {
+    const text = await asset.blob.text(), ext = asset.name.split('.').pop()!.toLowerCase();
+    let rows: MetadataFields[], priority: number;
+    try {
+      if (ext === 'csv') { rows = csvRows(text).map(metadataFields); priority = 30; }
+      else if (ext === 'txt') { rows = parseInfoText(text); priority = 40; }
+      else if (ext === 'json') { rows = [metadataFields(JSON.parse(text))]; priority = 20; }
+      else { rows = [parseInfoYaml(text)]; priority = 50; }
+    } catch (error) { throw new Error(`${asset.name}：${error instanceof Error ? error.message : error}`); }
+    metadata.push(...rows.map(fields => ({ fields, dir: parent(asset.name), group: asset.group, priority })));
+  }
+  const key = (path: string) => normalizePath(path).toLowerCase();
+  const associated = (asset: Asset) => metadata.filter(row => {
+    if (row.group !== asset.group) return false;
+    if (!row.fields.chart) return key(row.dir) === key(parent(asset.name));
+    if (key(row.dir + row.fields.chart) === key(asset.name) || key(row.fields.chart) === key(asset.name)) return true;
+    // Preserve CSV basename associations when exactly one file in this package
+    // and metadata directory matches. Repeated basenames need an explicit path.
+    if (key(filename(row.fields.chart)) !== key(row.fields.chart) || key(filename(asset.name)) !== key(row.fields.chart)) return false;
+    const candidates = assets.filter(value => value.group === asset.group &&
+      (!row.dir || key(value.name).startsWith(key(row.dir) + '/')) && key(filename(value.name)) === key(row.fields.chart));
+    return candidates.length === 1 && candidates[0] === asset;
+  }).sort((a, b) => b.priority - a.priority);
+  for (const asset of assets) {
+    if (audio.includes(asset) || images.includes(asset) || /(?:^|\/)(?:info\.(?:csv|txt|ya?ml)|__MACOSX)(?:$|\/)/i.test(asset.name)) continue;
+    // A chart referenced by metadata may have any extension. For loose text
+    // charts, content detection also covers .pec renamed to .txt or .rpe.
+    if (!/\.(?:json|pec|rpe|txt)$/i.test(asset.name) && !associated(asset).some(row => row.fields.chart)) {
+      const prefix = (await asset.blob.slice(0, 1024).text()).replace(/^\uFEFF/, '').trimStart();
+      if (!prefix.startsWith('{') && !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s+(?:bp|n[1-4]|c[vpdarmf])\s/i.test(prefix)) continue;
+    }
+    const text = (await asset.blob.text()).replace(/^\uFEFF/, '').trim();
+    texts.set(asset, text);
+    if (text.startsWith('{')) {
+      try { parsed.set(asset, JSON.parse(text)); } catch { throw new Error(`JSON 解析失败：${asset.name}`); }
+    }
   }
   const charts: LocalChart[] = [];
-  for (const [name, raw] of parsed) {
-    if (!raw || typeof raw !== 'object' || !('judgeLineList' in raw)) continue;
+  for (const [asset, text] of texts) {
+    const raw = parsed.get(asset), name = asset.name, rows = associated(asset);
+    const isJsonChart = raw && typeof raw === 'object' && 'judgeLineList' in raw;
+    const isPec = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s+(?:bp|n[1-4]|c[vpdarmf])\s/i.test(text);
+    const explicit = rows.some(row => row.fields.chart);
+    if (!isJsonChart && !isPec && !explicit) continue;
     progress(`读取 ${filename(name)}`);
-    const data = parseChart(raw);
+    const field = (key: string): string | undefined => rows.find(row => row.fields[key] !== undefined && row.fields[key] !== '')?.fields[key];
+    let data: ChartData;
+    try { data = parseChart(raw ?? text, field('format')); }
+    catch (error) { throw new Error(`${filename(name)}：${error instanceof Error ? error.message : error}`); }
     const dir = parent(name);
-    const row = metadata.find(value => value.chart === name || value.chart === filename(name));
-    const info = parsed.get(`${dir}info.json`) as Partial<ChartInfo> | undefined;
-    function choose(list: Asset[], requested?: string): Asset | undefined {
+    const meta = isJsonChart && data.sourceFormat === 'rpe' ? (raw as { META?: Record<string, any> }).META : undefined;
+    const declaredOffset = field('offset');
+    if (declaredOffset !== undefined) {
+      if (!Number.isFinite(Number(declaredOffset))) throw new Error(`${filename(name)}：元数据 offset 必须为秒数`);
+      data.offset += Number(declaredOffset);
+    }
+    function choose(list: Asset[], requested?: string, defaults: string[] = []): Asset | undefined {
+      list = list.filter(value => value.group === asset.group);
       if (requested) {
-        const found = list.find(asset => asset.name === dir + requested || asset.name === requested || filename(asset.name) === requested);
-        if (found) return found;
+        const descriptor = rows.find(row => row.fields.music === requested || row.fields.image === requested);
+        for (const path of [descriptor?.dir !== undefined ? descriptor.dir + requested : dir + requested, dir + requested, requested]) {
+          const matches = list.filter(value => key(value.name) === key(path));
+          if (matches.length === 1) return matches[0];
+        }
+        const matches = list.filter(value => key(filename(value.name)) === key(requested));
+        if (matches.length === 1) return matches[0];
+        throw new Error(`${filename(name)} 无法匹配资源：${requested}`);
       }
-      const nearby = list.filter(asset => parent(asset.name) === dir);
+      for (const fallback of defaults) for (const path of [dir + fallback, fallback]) {
+        const matches = list.filter(value => key(value.name) === key(path));
+        if (matches.length === 1) return matches[0];
+      }
+      const nearby = list.filter(asset => key(parent(asset.name)) === key(dir));
       if (nearby.length === 1) return nearby[0];
       if (list.length === 1) return list[0];
       return undefined;
     }
-    const music = choose(audio, row?.music || info?.music);
-    if (!music) throw new Error(`${filename(name)} 无法匹配音乐；请一并选择音乐，或在 info.csv 中填写 Chart、Music、Image`);
-    const image = choose(images, row?.image || 'image.png');
+    const music = choose(audio, field('music') || meta?.song);
+    if (!music) throw new Error(`${filename(name)} 无法匹配音乐；请一并选择音乐，或在 info.yml / info.txt / info.csv / info.json 中填写谱面与音乐路径`);
+    const image = choose(images, field('image') || meta?.background, ['image.png', 'background.png']);
     charts.push({
       id: `local:${crypto.randomUUID()}`, data, music: music.blob, image: image?.blob,
-      info: { name: row?.name || info?.name || filename(name).replace(/\.json$/i, ''), level: row?.level || info?.level || '自制谱',
-        composer: row?.composer || info?.composer, charter: row?.charter || info?.charter,
-        illustrator: row?.illustrator || info?.illustrator },
-      postfx: parsed.get(`${dir}postfx.json`),
+      info: { name: field('name') || meta?.name || filename(name).replace(/\.[^.]+$/i, ''), level: field('level') || meta?.level || '自制谱',
+        composer: field('composer') || meta?.composer, charter: field('charter') || meta?.charter,
+        illustrator: field('illustrator') || meta?.illustration },
+      postfx: parsed.get(assets.find(value => value.group === asset.group && key(value.name) === key(`${dir}postfx.json`))!),
     });
   }
-  if (!charts.length) throw new Error('未找到 Phigros JSON 谱面；支持 ZIP，或同时选择 JSON、音乐和曲绘');
+  if (!charts.length) throw new Error('未找到谱面；支持 Phigros v1/v3、PEC、RPE，以及 PEZ/ZIP 谱面包');
   return charts;
+}
+
+function normalizePath(path: string): string {
+  const parts: string[] = [];
+  for (const part of path.replaceAll('\\', '/').split('/')) {
+    if (part === '..') parts.pop(); else if (part && part !== '.') parts.push(part);
+  }
+  return parts.join('/');
 }

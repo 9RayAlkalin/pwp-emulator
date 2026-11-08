@@ -9,13 +9,13 @@
     <h2>pwp-emulator | Code by 9RayAlkalin</h2>
     <fieldset id="catalog">
         <legend>谱面</legend>
-        <p><label>导入 <input id="file-input" type="file" multiple accept=".zip,.json,.csv,.ogg,.mp3,.wav,.m4a,.flac,.png,.jpg,.jpeg,.webp" disabled></label></p>
+        <p><label>导入 <input id="file-input" type="file" multiple accept=".pez,.zip,.json,.pec,.rpe,.txt,.yml,.yaml,.csv,.ogg,.mp3,.wav,.m4a,.flac,.png,.jpg,.jpeg,.webp" disabled></label></p>
         <p>
             <label>搜索 <input id="search" type="search" placeholder="曲名、曲师、谱师"></label>
             <label>难度 <select id="filter"><option value="">全部</option><option>EZ</option><option>HD</option><option>IN</option><option>AT</option><option>SP</option><option value="LOCAL">本地</option></select></label>
         </p>
         <p><label>谱面 <select id="chart-select" disabled><option>正在启动…</option></select></label> <button id="load-chart" disabled>加载</button> <span id="catalog-count"></span></p>
-        <small>支持 Phigros v1/v3 JSON、ZIP；也可拖入文件。导入仅保留在当前页面会话。</small>
+        <small>支持 Phigros v1/v3、PEC、RPE、PEZ / ZIP，以及 info.yml / info.txt / info.csv / info.json；也可拖入文件。导入仅保留在当前页面会话。</small>
     </fieldset>
     <fieldset id="chart-info" disabled>
         <legend>谱面信息</legend>
@@ -24,7 +24,7 @@
         <p><label>难度 / 等级 <input data-info="level" type="text" placeholder="IN Lv.15"></label></p>
     </fieldset>
     <p id="toast" role="status" aria-live="polite" hidden></p>
-    <p id="drop-zone" hidden>松开以导入谱面（ZIP 或 JSON + 音乐 + 曲绘）。</p>
+    <p id="drop-zone" hidden>松开以导入谱面（PEZ / ZIP 或 JSON / PEC / RPE + 音乐 + 曲绘）。</p>
     <p id="loading-overlay" hidden><span id="loading-label">正在启动</span> <progress id="loading-fill" max="100" value="0"></progress> <span id="loading-text"></span></p>
     <fieldset>
         <legend>游玩</legend>
@@ -47,6 +47,13 @@
                 <label><input data-setting="playerShowName" type="checkbox" checked>显示玩家名称</label></p>
             <p><label>头像 <select data-setting="playerAvatar"><option value="OblivionPHIN">OblivionPHIN</option></select></label></p>
         </fieldset>
+        <fieldset id="result-collection">
+            <legend>结算收藏品（本地模拟）</legend>
+            <p><label>显示 <select data-setting="collectionDisplay"><option value="auto">自动（A 及以上）</option><option value="always">始终显示</option><option value="never">不显示</option></select></label>
+                <label>类型 <select data-setting="collectionType"><option value="data">Data</option><option value="avatar">头像</option><option value="illustration">曲绘</option><option value="file">收藏品档案</option></select></label></p>
+            <p id="collection-data-options"><label>Data 数量 (MB) <input data-setting="collectionAmount" type="number" min="0" max="1000000" step="0.01" value="1"></label></p>
+            <p id="collection-item-options" hidden><label>名称 <input data-setting="collectionName" type="text" maxlength="12" placeholder="留空使用类型名称"></label></p>
+        </fieldset>
         <p><label>音乐音量 <input data-setting="volume" type="range" min="0" max="1" step="0.01"><output></output></label></p>
         <p><label>打击音量 <input data-setting="hitVolume" type="range" min="0" max="1" step="0.01"><output></output></label></p>
         <p><label>背景亮度 <input data-setting="brightness" type="range" min="0" max="1" step="0.01"><output></output></label></p>
@@ -65,11 +72,40 @@
     </section>
     <dialog id="export-overlay">
         <h2>导出视频</h2>
+        <p><label>编码器 <select id="exp-backend"><option value="ffmpeg">FFmpeg.wasm（CPU）</option><option value="webcodecs">WebCodecs（可请求硬件编码）</option></select></label></p>
+        <p><small>FFmpeg 在浏览器中运行，首次使用需要加载编码资源；长视频也可选择 WebCodecs。</small></p>
+        <fieldset id="exp-ffmpeg-options">
+            <legend>FFmpeg 编码设置</legend>
+            <p><label>视频编码 <select id="exp-codec"><option value="h264">H.264 / AVC</option><option value="hevc">H.265 / HEVC</option><option value="vp9" disabled>VP9（请使用 WebCodecs）</option><option value="prores">Apple ProRes 422</option><option value="ffv1">FFV1（RGB 无损）</option></select></label>
+                <label>容器 <select id="exp-container"><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option><option value="mov">MOV</option></select></label></p>
+            <p><label>码率控制 <select id="exp-rate-control"><option value="crf">固定质量 CRF</option><option value="bitrate">目标码率</option></select></label>
+                <label>CRF <input id="exp-crf" type="number" min="0" max="51" step="1" value="20"></label>
+                <label>速度 <select id="exp-preset"><option>ultrafast</option><option>veryfast</option><option>fast</option><option>medium</option><option>slow</option><option>veryslow</option></select></label></p>
+            <p><label>像素格式 <select id="exp-pixel-format"><option value="yuv420p">4:2:0 · 8-bit</option><option value="yuv444p">4:4:4 · 8-bit</option><option value="yuv420p10le">4:2:0 · 10-bit</option><option value="yuv444p10le">4:4:4 · 10-bit</option><option value="yuv422p10le">4:2:2 · 10-bit</option><option value="bgr0">RGB · 8-bit 无损</option></select></label>
+                <label>ProRes 档位 <select id="exp-prores-profile" disabled><option value="0">Proxy</option><option value="1">LT</option><option value="2" selected>Standard</option><option value="3">HQ</option></select></label></p>
+            <p><label>音频编码 <select id="exp-audio-codec"><option value="auto">自动</option><option value="aac">AAC</option><option value="flac">FLAC 无损</option><option value="pcm">PCM 无损</option></select></label></p>
+            <p><label>线程模式 <select id="exp-threading"><option value="auto">自动</option><option value="single">单线程</option><option value="multi">多线程</option></select></label>
+                <label>编码线程 <input id="exp-threads" type="number" min="1" max="8" value="2"></label>
+                <button id="exp-isolation" type="button">启用多线程并刷新</button></p>
+            <p id="exp-thread-status"></p>
+            <small>HEVC 软编码需要多线程模式。切换模式会刷新页面，临时导入的谱面需重新导入。</small>
+        </fieldset>
+        <fieldset id="exp-browser-options" hidden>
+            <legend>浏览器编码设置</legend>
+            <p><label>视频编码 <select id="exp-browser-codec"><option value="auto">自动</option><option value="h264">H.264 · MP4</option><option value="hevc">HEVC · MP4</option><option value="vp9">VP9 · WebM</option><option value="vp8">VP8 · WebM</option></select></label>
+                <label>硬件偏好 <select id="exp-hardware"><option value="no-preference">自动</option><option value="prefer-hardware">优先硬件</option><option value="prefer-software">优先软件</option></select></label>
+                <button id="exp-probe" type="button">检测支持</button></p>
+            <p id="exp-capabilities" role="status"></p>
+            <small>硬件偏好由浏览器和驱动处理，检测通过不代表一定使用 GPU。H.264 / HEVC 使用 FFmpeg 封装，视频编码仍由 WebCodecs 完成。</small>
+        </fieldset>
         <p><label>宽 <input id="exp-w" type="number" min="64" max="4096" step="2" value="1920"></label> <label>高 <input id="exp-h" type="number" min="64" max="4096" step="2" value="1080"></label></p>
         <p><button id="exp-p720">1280×720</button> <button id="exp-p1080">1920×1080</button> <button id="exp-pwin">窗口尺寸</button></p>
-        <p><label>帧率 <select id="exp-fps"><option value="60">60</option><option value="30">30</option></select></label> <label>码率 (Mbps) <input id="exp-bitrate" type="number" min="1" max="80" value="10"></label></p>
+        <p><label>帧率 <select id="exp-fps"><option value="60">60</option><option value="30">30</option><option value="24">24</option><option value="120">120</option></select></label> <label>码率 (Mbps) <input id="exp-bitrate" type="number" min="1" max="200" value="10"></label></p>
+        <p><label>最大关键帧间隔 (s) <input id="exp-keyframe" type="number" min="0.1" max="30" step="0.1" value="2"></label> <label>音频码率 (kbps) <input id="exp-audio-bitrate" type="number" min="32" max="512" step="32" value="192"></label></p>
         <p><label>开始 (s) <input id="exp-start" type="number" min="0" step="0.1" value="0"></label> <label>结束 (s) <input id="exp-end" type="number" min="0" step="0.1" value="0"></label></p>
         <p><button id="exp-whole">整首</button> <button id="exp-here">当前至末尾</button> <label><input id="exp-audio" type="checkbox" checked>含音乐</label></p>
+        <p><label><input id="exp-loading" type="checkbox">包含 Loading</label> <label><input id="exp-result" type="checkbox">包含 Result</label> <label>结算时长 (s) <input id="exp-result-seconds" type="number" min="3.5" max="60" step="0.5" value="7" disabled></label></p>
+        <p><small>起止时间为谱面时间；从 0 秒开始时保留 Gameplay 进场，勾选的加载和结算画面额外加入。</small></p>
         <p id="exp-est"></p>
         <p><button id="exp-go">开始导出</button> <button id="exp-cancel" disabled>取消导出</button> <button id="export-close">关闭</button></p>
         <div id="export-progress-wrap" hidden><progress id="export-progress-fill" max="100" value="0"></progress><p id="export-status"></p></div>

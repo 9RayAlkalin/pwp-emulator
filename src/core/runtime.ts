@@ -6,11 +6,18 @@ import { badNoteAlpha, gameplayMetrics, judgeLineColor, lateNoteAlpha, noteIsVis
 import { ease } from './easing';
 import { block_transform, block_state, blockingBlockAt, BlockTouchFeedback } from './blocks';
 import { MusicLowPass } from './block-audio';
-import { UnityUI } from './unity-ui';
+import { UnityUI, type SceneView } from './unity-ui';
 import { entrancePhase, loadingDisplaySeconds, gameplayOpeningSeconds, gameplayEndingSeconds } from './play-entrance';
 import { recordResult } from './result-records';
+import { exportFrame, exportTimeline, type ExportScenes, type ExportTimeline } from './export-timeline';
+import { resultMusicFile, resultMusicFiles } from './result-music';
+import { renderVideo } from './export/render-job';
+import { renderAudio } from './export/audio';
+import { checkCancelled, type ExportBackend } from './export/types';
+import { videoFormats, type BrowserCodec, type EncodingOptions, type FFmpegCodec } from './export/options';
 import './canvas';
 import { linear, find_event, init_speed_events, merge_notes, init_note_fp, get_event_val, get_fp, rotate_point } from './timeline';
+import { createLineStateResolver, lineAppearance } from './chart-state';
 
 // Original rendering state includes optional uniforms for chart-specific effect passes.
 const C: any = {
@@ -130,9 +137,29 @@ const events = new EventTarget();
 let localUrls: string[] = [];
 let finishSent = false;
 
+const resultMusicBuffers = new Map<string, AudioBuffer>();
+const resultMusicGain = actx.createGain();
+resultMusicGain.connect(actx.destination);
+let resultMusicSource: AudioBufferSourceNode | null = null;
+const stopResultMusic = () => {
+    if (!resultMusicSource) return;
+    resultMusicSource.stop(); resultMusicSource.disconnect(); resultMusicSource = null;
+};
+const startResultMusic = (elapsed = 0) => {
+    stopResultMusic();
+    const buffer = resultMusicBuffers.get(resultMusicFile(C.chart.info?.level || ''));
+    if (!buffer || C.video_export_active) return;
+    const source = actx.createBufferSource();
+    source.buffer = buffer; source.loop = true;
+    resultMusicGain.gain.value = settings.volume;
+    source.connect(resultMusicGain); source.start(0, Math.max(0, elapsed) % buffer.duration);
+    resultMusicSource = source;
+};
+
 const sceneNow = () => performance.now() / 1000;
 const transitionScene = (to: string) => {
     const from = C.scene;
+    if (from === 'result' && to !== 'result') stopResultMusic();
     if (to === 'pause') {
         const snapshot = document.createElement('canvas'); snapshot.width = cv.width; snapshot.height = cv.height;
         snapshot.getContext('2d')!.drawImage(cv, 0, 0); C.pauseSnapshot = snapshot;
@@ -156,6 +183,7 @@ const transitionScene = (to: string) => {
         : .5;
     C.sceneTransition = { from, to, start: sceneNow(), duration, kind };
     if (to === 'result') {
+        startResultMusic();
         C.resultStarted = sceneNow();
         C.previousBest = recordResult(C.chart.dir || C.chart.info.name, C.resultStats?.score || 0);
         C.resultCollection = false;
@@ -165,6 +193,7 @@ const transitionScene = (to: string) => {
     }
 };
 const preparePlayback = () => {
+    stopResultMusic();
     C.entrance = null; C.resumeAt = 0; C.gameOverAt = 0; C.scene = 'ready'; cv.dataset.scene = 'ready';
     C.sceneTransition = { from: 'ready', to: 'ready', start: sceneNow(), duration: 0, kind: 'none' };
     document.getElementById('stage')!.hidden = true;
@@ -186,6 +215,13 @@ const ui: any = {
     btn_export: el("#btn-export"),
     export_overlay: el("#export-overlay"),
     export_close: el("#export-close"),
+    export_backend: el("#exp-backend"),
+    export_codec: el('#exp-codec'), export_container: el('#exp-container'), export_rate_control: el('#exp-rate-control'),
+    export_crf: el('#exp-crf'), export_preset: el('#exp-preset'), export_pixel_format: el('#exp-pixel-format'),
+    export_prores_profile: el('#exp-prores-profile'), export_audio_codec: el('#exp-audio-codec'),
+    export_browser_codec: el('#exp-browser-codec'), export_hardware: el('#exp-hardware'), export_probe: el('#exp-probe'),
+    export_keyframe: el('#exp-keyframe'), export_audio_bitrate: el('#exp-audio-bitrate'),
+    export_threading: el('#exp-threading'), export_threads: el('#exp-threads'), export_isolation: el('#exp-isolation'),
     export_w: el("#exp-w"),
     export_h: el("#exp-h"),
     export_fps: el("#exp-fps"),
@@ -193,6 +229,9 @@ const ui: any = {
     export_start: el("#exp-start"),
     export_end: el("#exp-end"),
     export_audio: el("#exp-audio"),
+    export_loading: el("#exp-loading"),
+    export_result: el("#exp-result"),
+    export_result_seconds: el("#exp-result-seconds"),
     export_est: el("#exp-est"),
     export_p720: el("#exp-p720"),
     export_p1080: el("#exp-p1080"),
@@ -2024,30 +2063,38 @@ const render_scene = (sctx, t, mode?) => {
     }
     const indicatorColor = judgeLineColor(settings.apFcIndicator ?? true,
         settings.autoplay || C.video_export_active ? { good: 0, bad: 0, miss: 0 } : (C.line_status ?? judge.stats));
-    for (const line of C.chart.data.judgeLineList) {
+    for (const line of [...C.chart.data.judgeLineList].sort((a, b) => (a.animation?.zOrder ?? 0) - (b.animation?.zOrder ?? 0))) {
         let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
+        const appearance = lineAppearance(line, t);
         lineX *= w; lineY *= h;
         const lineDrawPos = [
-            ...rotate_point(lineX, lineY, h * C.lineh, lineRotate),
-            ...rotate_point(lineX, lineY, h * C.lineh, lineRotate + 180)
+            ...rotate_point(lineX, lineY, h * C.lineh * appearance.scaleX, lineRotate),
+            ...rotate_point(lineX, lineY, h * C.lineh * appearance.scaleX, lineRotate + 180)
         ];
 
         sctx.save();
         sctx.globalAlpha = Math.max(0, Math.min(1, lineAlpha));
-        sctx.drawLine(...lineDrawPos, h * C.linew, indicatorColor);
+        if (appearance.text !== undefined) {
+            sctx.translate(lineX, lineY); sctx.rotate(lineRotate * Math.PI / 180);
+            sctx.scale(appearance.scaleX, appearance.scaleY);
+            sctx.font = `${h * 60 / 900}px sans-serif`; sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
+            sctx.fillStyle = appearance.color || '#ffffff';
+            appearance.text.split('\n').forEach((text, i, rows) => sctx.fillText(text, 0, (i - (rows.length - 1) / 2) * h * 72 / 900));
+        } else sctx.drawLine(...lineDrawPos, Math.abs(h * C.linew * appearance.scaleY), appearance.color || indicatorColor);
         sctx.restore();
     }
     // All judgement lines precede all notes, including notes from other lines.
     for (const note of C.chart.renderNotes) {
         const line = note.master;
-        let [lineRotate, lineX, lineY] = line.get_state(t);
+        let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
+        if (line.animation && lineAlpha < 0) continue;
         lineX *= w; lineY *= h;
         const beatt = line.sec2beat(t);
         const linefp = get_fp(beatt, line.speedEvents);
             if ((settings.autoplay || C.video_export_active) && note.sect < t && !note.clicked) {
                 // 视频导出时不发声：导出比实时快，实时播放的打击音必然错位
                 // （导出的音轨只有音乐，见「视频导出」一节），clicked 标记照置。
-                if (!C.video_export_active && clock.running) play_sound(C.click_sounds[note.type]);
+                if (!note.isFake && !C.video_export_active && clock.running) play_sound(C.click_sounds[note.type]);
                 note.clicked = true;
             }
 
@@ -2067,30 +2114,34 @@ const render_scene = (sctx, t, mode?) => {
             // 负流速（judgeLineSpeedEvent.value<0）时 linefp 往回走，dist 会在 note 自己到点
             // **之前**就变负 ⇒ 原版不显示，我们原先只判 < -1e6 所以把它画出来了。
             const dist = note.floorPosition - linefp;
-            if (note.sect >= t && dist < -Math.max(note.floorPosition / 6000000, 0.001)) continue;
+            if (line.animation) {
+                const tailDist = note.is_hold ? get_fp(note.time + note.holdTime, line.speedEvents) - linefp : dist;
+                if (line.animation.cover && note.sect >= t && dist * note.speed < -0.001 && tailDist * note.speed < -0.001) continue;
+            } else if (note.sect >= t && dist < -Math.max(note.floorPosition / 6000000, 0.001)) continue;
 
             let note_fp = dist * C.units.pgrh * (C.units.pgrbeat / line.bpm) * h;
 
-            if (!note.is_hold) note_fp *= note.speed;
+            if (!note.is_hold || line.animation) note_fp *= note.speed;
             if (!note.is_hold && note_fp < -1e6) continue;
             if (note_fp > h * 2) continue;
 
-            const draw_head = note.is_hold ? t <= note.sect : !note.clicked;
+            const draw_head = note.is_hold ? note.isFake || t <= note.sect : !note.clicked;
             const note_head_img = C.note_head_imgs[note.type][note.morebets];
-            const this_note_width = note_width * (note.morebets ? (
+            const base_note_width = note_width * (note.morebets ? (
                 C.note_head_imgs[note.type][1].width
                 / C.note_head_imgs[note.type][0].width
             ) : 1.0);
-
-            const this_note_head_height = this_note_width / note_head_img.width * note_head_img.height;
-            const note_atline_pos = rotate_point(lineX, lineY, note.positionX * C.units.pgrw * w, lineRotate);
+            const this_note_width = base_note_width * (note.size ?? 1);
+            const this_note_head_height = base_note_width / note_head_img.width * note_head_img.height;
             const l2n_rotate = lineRotate - (note.is_above ? 90 : -90);
+            const note_atline_pos = rotate_point(...rotate_point(lineX, lineY, note.positionX * C.units.pgrw * w, lineRotate),
+                (note.yOffset ?? 0) * note.speed * C.units.pgrh * h, l2n_rotate);
             const note_head_pos = rotate_point(...note_atline_pos, note_fp, l2n_rotate);
 
             const note_draw_rotate = lineRotate + (note.is_above ? 0 : 180);
 
             sctx.save();
-            sctx.globalAlpha = note.is_hold ? result?.visualMissed ? gameplayMetrics.holdMissAlpha : 1 : lateNoteAlpha(note, t);
+            sctx.globalAlpha = (note.alpha ?? 1) * (note.is_hold ? result?.visualMissed ? gameplayMetrics.holdMissAlpha : 1 : lateNoteAlpha(note, t));
             if (draw_head && !note.is_hold) {
                 sctx.drawCenterRotateImage(
                     note_head_img, ...note_head_pos,
@@ -2102,7 +2153,7 @@ const render_scene = (sctx, t, mode?) => {
             if (note.is_hold) {
                 const note_body_img = C.hold_body_imgs[note.morebets];
                 const note_tail_img = C.hold_tail_imgs[note.morebets];
-                const note_tail_height = this_note_width / note_tail_img.width * note_tail_img.height;
+                const note_tail_height = base_note_width / note_tail_img.width * note_tail_img.height;
 
                 /* hold 体收缩量按【剩余时间】线性，不按 dist —— 原版 HoldControl::NoteMove
                    （@0x1D83314，2026-10-06 反编译）holding 分支直接写 SpriteRenderer 局部缩放：
@@ -2114,9 +2165,11 @@ const render_scene = (sctx, t, mode?) => {
                    跳过整段 fp-span ⇒ 点击后 body 秒塌 = 「部分长条打击后就消失」
                    （Message SP t≈22.9/24.3/25.1 三处，各叠两条 note）；负流速段则反过来只缩不完。
                    修法：clicked 起用 (t−sect)/secht 线性收缩，未点击保持全长。 */
-                const hold_full = note.hold_length * h;
-                const attached = t > note.sect;
-                const hold_shrink = attached
+                const attached = t > note.sect && !note.isFake;
+                const hold_full = line.animation
+                    ? Math.max(0, (get_fp(note.time + note.holdTime, line.speedEvents) - (attached ? linefp : note.floorPosition)) * C.units.pgrh * h * note.speed)
+                    : note.hold_length * h;
+                const hold_shrink = attached && !line.animation
                     ? hold_full * Math.min(1, Math.max(0, (t - note.sect) / Math.max(note.secht, 1e-6)))
                     : 0;
                 const note_body_height = Math.max(
@@ -2271,243 +2324,11 @@ const render = () => {
 };
 
 /* ---------------- 视频导出 ----------------
-   把当前谱面离线逐帧渲染成 WebM（VP9/VP8 + Opus）。为什么这么做：
-
-   1. 不跟真实时钟走：每帧直接调 render_frame_at(t)（与「seek 后手动 render()」同一条
-      管线），帧号 → 时间戳精确可复现；机器快就导出快，不会因为是实时的而丢帧。
-   2. 编码走 WebCodecs（VideoEncoder + AudioEncoder），时间戳由我们自己写死（i/fps），
-      输出是严格 CFR；不走 MediaRecorder（它只能边放边录，时间戳跟墙钟抖动）。
-   3. 封装是这个文件里的最小 WebM（EBML/Matroska）写入器，不引第三方库：
-      整文件在内存里攒完一次性成 Blob，所有元素尺寸精确写出；不写 SeekHead
-      （与 MediaRecorder 产物同档，Chrome/ffmpeg 都能播能拖），Cues 写全
-      （每个视频关键帧一条），拖进度条靠它。
-   4. 音频不走实时采样：OfflineAudioContext 把 music.ogg 重采样到 48k 后整段切片
-      喂 Opus 编码器 —— 音视频时间戳同源，天然对齐。
-      打击音（WebAudio 实时播放那套）不进导出：导出比实时快，实时音必然错位；
-      录像对照要的是「音乐 vs 画面」，不是「游戏音效」。
-   5. 导出期间画布临时切到目标分辨率（resize_canvases），结束后恢复窗口尺寸
-      （resize_to_window）；render() 由 C.video_export_active 让位。
-
-   控制台/脚本用法（_analysis 的 eval 工作流可直接调）：
-     const blob = await export_video({ width: 1280, height: 720, fps: 60,
-                                       start: 0, end: 172, audio: true, bitrate: 5 });
-   start/end 单位秒、与播放时钟同域（音频秒）；bitrate 单位 Mbps（缺省按分辨率自动）。
-   返回值同时挂在 video_export.blob 上；面板「开始导出」= 调它 + 触发下载。
-
-   内存：整段编码数据 + 最终 Blob 同时在内存里，峰值 ≈ 2× 文件大小
-   （1080p60 三分钟约 200~250 MB 量级，属可接受；要更低就把码率调小）。 */
-
-/* ---- 最小 WebM 写入器 ----
-   EBML 基本元素就这几样，全部「已知尺寸」写出。IDs 按规范字节直接列。 */
-const wb_utf8 = new TextEncoder();
-const WEBM_ID = {
-    ebml: [0x1A, 0x45, 0xDF, 0xA3],
-    ebml_version: [0x42, 0x86], ebml_read_version: [0x42, 0xF7],
-    ebml_max_id: [0x42, 0xF2], ebml_max_size: [0x42, 0xF3],
-    doctype: [0x42, 0x82], doctype_version: [0x42, 0x87], doctype_read_version: [0x42, 0x85],
-    segment: [0x18, 0x53, 0x80, 0x67],
-    info: [0x15, 0x49, 0xA9, 0x66], timecode_scale: [0x2A, 0xD7, 0xB1],
-    muxing_app: [0x4D, 0x80], writing_app: [0x57, 0x41], duration: [0x44, 0x89],
-    tracks: [0x16, 0x54, 0xAE, 0x6B], track_entry: [0xAE], track_number: [0xD7],
-    track_uid: [0x73, 0xC5], track_type: [0x83], flag_lacing: [0x9C],
-    codec_id: [0x86], codec_private: [0x63, 0xA2], codec_delay: [0x56, 0xAA],
-    seek_pre_roll: [0x56, 0xBB], default_duration: [0x23, 0xE3, 0x83],
-    video: [0xE0], flag_interlaced: [0x9A], pixel_width: [0xB0], pixel_height: [0xBA],
-    audio: [0xE1], sampling_freq: [0xB5], channels: [0x9F],
-    cluster: [0x1F, 0x43, 0xB6, 0x75], timecode: [0xE7], simple_block: [0xA3],
-    cues: [0x1C, 0x53, 0xBB, 0x6B], cue_point: [0xBB], cue_time: [0xB3],
-    cue_positions: [0xB7], cue_track: [0xF7], cue_cluster_pos: [0xF1]
-};
-
-/* 拼接若干 Uint8Array（可嵌套数组 / 跳过 null），一次性分配 */
-const cat_bytes = (...arrs) => {
-    const flat: Uint8Array[] = [];
-    const push = a => {
-        if (a == null) return;
-        if (a instanceof Uint8Array) { flat.push(a); return; }
-        for (const x of a) push(x);
-    };
-    push(arrs);
-    let n = 0;
-    for (const b of flat) n += b.length;
-    const out = new Uint8Array(n);
-    let off = 0;
-    for (const b of flat) { out.set(b, off); off += b.length; }
-    return out;
-};
-
-/* EBML 变长整数（元素尺寸、SimpleBlock 里的轨道号）。全 1 模式是「未知尺寸」保留值，
-   所以可用上界是 2^(7·len)−2，按此选最短长度。 */
-const wb_vint = v => {
-    for (let len = 1; len <= 8; len++) {
-        const max = Math.pow(2, 7 * len) - 1;
-        if (v < max) {
-            const out = new Uint8Array(len);
-            let x = v;
-            for (let i = len - 1; i >= 0; i--) { out[i] = x & 0xff; x = Math.floor(x / 256); }
-            out[0] |= 1 << (8 - len);
-            return out;
-        }
-    }
-    throw new Error("webm: vint 溢出");
-};
-
-const wb_uint = n => {
-    const out: number[] = [];
-    let x = Math.max(0, Math.floor(n));
-    do { out.unshift(x & 0xff); x = Math.floor(x / 256); } while (x > 0);
-    return Uint8Array.from(out);
-};
-
-const wb_f64 = n => {
-    const b = new Uint8Array(8);
-    new DataView(b.buffer).setFloat64(0, n);
-    return b;
-};
-
-const wb_el = (id, ...payload) => {
-    const body = cat_bytes(...payload);
-    return cat_bytes(Uint8Array.from(id), wb_vint(body.length), body);
-};
-
-/* 写入器：add_video/add_audio 收 EncodedVideoChunk/EncodedAudioChunk（按时间戳归并
-   入簇，见导出驱动的 pump），finish 出 Blob。
-   簇切换：>4s / >4MB / 遇视频关键帧（导出每 2s 一个）——
-   簇内 SimpleBlock 的相对时间戳是 int16 毫秒，4s 远在 ±32.7s 限内。
-   frame_ns = 视频帧时长（ns），写进 TrackEntry/DefaultDuration —— 没有它
-   ffprobe/播放器推不出帧率（实测 r_frame_rate 会变成 1000/1 这种怪值）。 */
-const webm_writer = ({ width, height, video_codec, frame_ns, audio, duration_ms }) => {
-    const clusters: Uint8Array<ArrayBuffer>[] = [];
-    const cues: { t: number; cluster: number }[] = [];
-    let cur: { ts: number; blocks: Uint8Array<ArrayBuffer>[]; size: number } | null = null;
-
-    const new_cluster = ts => { cur = { ts, blocks: [], size: 0 }; };
-    const seal_cluster = () => {
-        if (!cur) return;
-        clusters.push(wb_el(WEBM_ID.cluster,
-            wb_el(WEBM_ID.timecode, wb_uint(cur.ts)), ...cur.blocks));
-        cur = null;
-    };
-    const add_block = (track, ts_ms, key, data) => {
-        if (!cur) new_cluster(ts_ms);
-        const span = ts_ms - cur!.ts;
-        if (span > 4000 || cur!.size > (4 << 20) || (track === 1 && key && cur!.blocks.length && span > 0)) {
-            seal_cluster();
-            new_cluster(ts_ms);
-        }
-        const head = new Uint8Array(4);
-        head[0] = 0x80 | track;                                   // 轨道号 vint（1/2 均单字节）
-        new DataView(head.buffer).setInt16(1, ts_ms - cur!.ts);
-        head[3] = key ? 0x80 : 0;
-        // ★ SimpleBlock = A3 + 尺寸 + [轨道号][int16 相对时间][flags][数据]。
-        //   第一版漏了 wb_el 这层包装，把裸 payload 塞进簇 —— 文件结构自洽（尺寸都对），
-        //   ffmpeg 也能认出轨道/时长，但一个 Block 都解不出来
-        //   （_analysis\ebml_check.py 与 ffprobe 的 “0x00 at pos …” 警告就是这来的）。
-        const blk = wb_el(WEBM_ID.simple_block, head, data);
-        cur!.blocks.push(blk);
-        cur!.size += blk.length;
-        if (track === 1 && key) cues.push({ t: ts_ms, cluster: clusters.length });
-    };
-    const chunk_bytes = chunk => {
-        const b = new Uint8Array(chunk.byteLength);
-        chunk.copyTo(b);
-        return b;
-    };
-
-    const finish = () => {
-        seal_cluster();
-        const info = wb_el(WEBM_ID.info,
-            wb_el(WEBM_ID.timecode_scale, wb_uint(1000000)),     // 1 tick = 1ms
-            wb_el(WEBM_ID.muxing_app, wb_utf8.encode("PhigrosWebPlayer")),
-            wb_el(WEBM_ID.writing_app, wb_utf8.encode("PhigrosWebPlayer")),
-            wb_el(WEBM_ID.duration, wb_f64(duration_ms)));
-        const tracks_payload = [wb_el(WEBM_ID.track_entry,
-            wb_el(WEBM_ID.track_number, wb_uint(1)),
-            wb_el(WEBM_ID.track_uid, wb_uint(1)),
-            wb_el(WEBM_ID.track_type, wb_uint(1)),
-            wb_el(WEBM_ID.flag_lacing, wb_uint(0)),
-            wb_el(WEBM_ID.codec_id, wb_utf8.encode(video_codec)),
-            wb_el(WEBM_ID.default_duration, wb_uint(frame_ns)),  // ns/帧 → 帧率元数据
-            wb_el(WEBM_ID.video,
-                wb_el(WEBM_ID.flag_interlaced, wb_uint(2)),      // 2 = progressive
-                wb_el(WEBM_ID.pixel_width, wb_uint(width)),
-                wb_el(WEBM_ID.pixel_height, wb_uint(height))))];
-        if (audio) {
-            tracks_payload.push(wb_el(WEBM_ID.track_entry,
-                wb_el(WEBM_ID.track_number, wb_uint(2)),
-                wb_el(WEBM_ID.track_uid, wb_uint(2)),
-                wb_el(WEBM_ID.track_type, wb_uint(2)),
-                wb_el(WEBM_ID.flag_lacing, wb_uint(0)),
-                wb_el(WEBM_ID.codec_id, wb_utf8.encode("A_OPUS")),
-                wb_el(WEBM_ID.codec_private, audio.codec_private),
-                wb_el(WEBM_ID.codec_delay, wb_uint(audio.codec_delay_ns)),
-                wb_el(WEBM_ID.seek_pre_roll, wb_uint(80000000)), // Opus 规范值 80ms
-                wb_el(WEBM_ID.audio,
-                    wb_el(WEBM_ID.sampling_freq, wb_f64(48000)),
-                    wb_el(WEBM_ID.channels, wb_uint(audio.channels)))));
-        }
-        const tracks = wb_el(WEBM_ID.tracks, ...tracks_payload);
-
-        // Cues 的簇位置 = 相对 Segment 数据起点（Info/Tracks 之后）的字节偏移；
-        // 此时所有簇都已封口，尺寸全知
-        let off = info.length + tracks.length;
-        const cl_off = clusters.map(c => { const o = off; off += c.length; return o; });
-        const cues_el = wb_el(WEBM_ID.cues, ...cues.map(q => wb_el(WEBM_ID.cue_point,
-            wb_el(WEBM_ID.cue_time, wb_uint(q.t)),
-            wb_el(WEBM_ID.cue_positions,
-                wb_el(WEBM_ID.cue_track, wb_uint(1)),
-                wb_el(WEBM_ID.cue_cluster_pos, wb_uint(cl_off[q.cluster]))))));
-
-        // Segment 头单独写（尺寸 = 其后全部内容）；其余全部作为 Blob 分片拼装，
-        // 避免再整体复制一份
-        const seg_head = cat_bytes(Uint8Array.from(WEBM_ID.segment), wb_vint(off + cues_el.length));
-        const head = wb_el(WEBM_ID.ebml,
-            wb_el(WEBM_ID.ebml_version, wb_uint(1)),
-            wb_el(WEBM_ID.ebml_read_version, wb_uint(1)),
-            wb_el(WEBM_ID.ebml_max_id, wb_uint(4)),
-            wb_el(WEBM_ID.ebml_max_size, wb_uint(8)),
-            wb_el(WEBM_ID.doctype, wb_utf8.encode("webm")),
-            wb_el(WEBM_ID.doctype_version, wb_uint(4)),          // VP9 需要 ≥4（VP8 也兼容）
-            wb_el(WEBM_ID.doctype_read_version, wb_uint(2)));
-        const blob = new Blob([head, seg_head, info, tracks, ...clusters, cues_el],
-                              { type: "video/webm" });
-        clusters.length = 0;   // Blob 已复制，释放引用给 GC
-        return blob;
-    };
-
-    return {
-        add_video: chunk => add_block(1, Math.round(chunk.timestamp / 1000),
-                                      chunk.type === "key", chunk_bytes(chunk)),
-        add_audio: chunk => add_block(2, Math.round(chunk.timestamp / 1000),
-                                      true, chunk_bytes(chunk)),
-        finish
-    };
-};
-
-/* ---- 导出驱动 ---- */
+   Runtime 提供场景绘制及状态恢复；export/ 负责固定帧驱动、离线音频和独立编码器。 */
+let exportAbort: AbortController | null = null;
 
 const video_export: { blob: Blob | null; name: string; done: number; total: number; status: string; error: unknown; perf0: number } = {
     blob: null, name: "", done: 0, total: 0, status: "", error: null, perf0: 0
-};
-
-/* 让出主线程一拍。不能用 setTimeout：后台标签页里被节流到 ≥1s，
-   导出会退化成 1 帧/秒。MessageChannel 不受节流，而且必须是宏任务级让步 ——
-   await 一个已 resolve 的 promise 只清微任务队列，浏览器/工具消息永远进不来。 */
-const yield_tick = () => new Promise<void>(resolve => {
-    const mc = new MessageChannel();
-    mc.port1.onmessage = () => { mc.port1.close(); resolve(); };
-    mc.port2.postMessage(0);
-});
-
-/* 每帧必让出（不是只在积压时让）：渲染一帧是同步大块，若编码器跟得上、
-   队列不积压，这个函数此前会直接返回 —— 整个导出循环变成一条微任务长链，
-   主线程被焊死（本轮实测：连 1+1 的评估都进不来）。另外顺带兜底：
-   编码器出错/被取消时别在这里空转。 */
-const wait_encoder = async (enc, abort_check?) => {
-    do {
-        if (abort_check) abort_check();
-        await yield_tick();
-    } while (enc.encodeQueueSize > 8);
 };
 
 /* 导出/跳转预置：t0 是音乐秒，先减谱面 offset，clicked ⇔ sect < 谱面秒。
@@ -2519,7 +2340,7 @@ const preclick_notes = t0 => {
     }
 };
 
-const export_filename = (w, h, fps) => {
+const export_filename = (w, h, fps, extension: string) => {
     const info = C.chart.info || {};
     const dir = String(C.chart.dir || "").split("/").filter(Boolean).pop() || "";
     const base = [info.name || "chart", dir, `${w}x${h}`, `${fps}fps`]
@@ -2528,88 +2349,23 @@ const export_filename = (w, h, fps) => {
     const p2 = n => String(n).padStart(2, "0");
     const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}` +
                   `_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
-    return `${base}_${stamp}.webm`;
+    return `${base}_${stamp}.${extension}`;
 };
 
-/* 音频轨：music.ogg → 48k 立体声 [t0, t1) 段（OfflineAudioContext 离线重采样，
-   比实时快得多；t0 超曲长则整段静音）。url 走 <audio> 元素同一地址，命中 HTTP 缓存。 */
-const render_audio_48k = async (url, t0, t1) => {
-    const buf = await load_audio(url);
-    const sr = 48000;
-    const len = Math.max(1, Math.ceil((t1 - t0) * sr));
-    const off = new OfflineAudioContext(2, len, sr);
-    if (buf && t0 < buf.duration) {
-        const src = off.createBufferSource();
-        src.buffer = buf;
-        src.start(0, t0, Math.max(0, Math.min(t1, buf.duration) - t0));
-        src.connect(off.destination);
-    }
-    return await off.startRendering();
-};
-
-/* Opus 编码：20ms 一帧（960 样点）。时间戳从 0 起（与视频同源）。
-   decoderConfig.description 就是 OpusHead，留作 CodecPrivate；没有就手搓兜底。 */
-const opus_head_fallback = channels => {
-    const b = new Uint8Array(19);
-    b.set(wb_utf8.encode("OpusHead"), 0);
-    b[8] = 1;                                        // version
-    b[9] = channels;
-    const dv = new DataView(b.buffer);
-    dv.setUint16(10, 312, true);                     // pre-skip（libopus 默认 6.5ms）
-    dv.setUint32(12, 48000, true);                   // 原始采样率
-    dv.setUint16(16, 0, true);                       // 输出增益
-    b[18] = 0;                                       // 声道映射族 = 0（单流）
-    return b;
-};
-
-const encode_audio_48k = async rendered => {
-    const chunks: EncodedAudioChunk[] = [];
-    const out: { desc: Uint8Array | null; error: unknown; channels: number } = { desc: null, error: null, channels: rendered.numberOfChannels };
-    const enc = new AudioEncoder({
-        output: (chunk, meta) => {
-            const d = meta && meta.decoderConfig && meta.decoderConfig.description;
-            if (d && !out.desc) out.desc = ArrayBuffer.isView(d)
-                ? new Uint8Array(d.buffer, d.byteOffset, d.byteLength).slice() : new Uint8Array(d).slice();
-            chunks.push(chunk);
-        },
-        error: e => { out.error = e; }
+const render_export_frame = (plan: ExportTimeline, time: number, view: Partial<SceneView>) => {
+    const frame = exportFrame(plan, time), ctx = cv.getContext('2d')!;
+    if (frame.scene === 'game') render_frame_at(frame.musicTime);
+    else if (frame.scene === 'game-opening' || frame.scene === 'game-over') {
+        update_game_score(frame.musicTime - C.chart.data.offset + settings.offset / 1000);
+        drawGameplayTransition(ctx, frame.elapsed, frame.scene === 'game-over', frame.musicTime);
+    } else drawSceneOverlay(ctx, frame.scene, frame.elapsed, {
+        ...view, collection: frame.scene === 'result' && frame.elapsed >= 2 && Number(view.stats?.score || 0) >= 880000,
     });
-    enc.configure({
-        codec: "opus", sampleRate: 48000,
-        numberOfChannels: out.channels, bitrate: 128000
-    });
-    const FRAME = 960;                               // 20ms @48k
-    const planes: Float32Array[] = [];
-    for (let c = 0; c < out.channels; c++) planes.push(rendered.getChannelData(c));
-    let n_chunk = 0;
-    for (let pos = 0; pos < rendered.length; pos += FRAME) {
-        if (out.error) break;
-        const n = Math.min(FRAME, rendered.length - pos);
-        const planar = new Float32Array(n * out.channels);
-        for (let c = 0; c < out.channels; c++) {
-            planar.set(planes[c].subarray(pos, pos + n), c * n);
-        }
-        const ad = new AudioData({
-            format: "f32-planar", sampleRate: 48000,
-            numberOfFrames: n, numberOfChannels: out.channels,
-            timestamp: Math.round(pos / 48000 * 1e6), data: planar
-        });
-        enc.encode(ad);
-        ad.close();
-        n_chunk++;
-        if ((n_chunk & 127) === 0) await yield_tick();   // 长曲也别把主线程焊住
-        if (enc.encodeQueueSize > 16) await wait_encoder(enc);
-    }
-    await enc.flush().catch(e => { out.error = out.error || e; });
-    enc.close();
-    chunks.sort((a, b) => a.timestamp - b.timestamp);
-    return { chunks, desc: out.desc, error: out.error, channels: out.channels };
 };
 
-const export_video = async (opt: { fps?: number; width?: number; height?: number; start?: number; end?: number; bitrate?: number; audio?: boolean } = {}) => {
+const export_video = async (opt: ExportScenes & { backend?: ExportBackend; encoding?: Partial<EncodingOptions>; browserCodec?: BrowserCodec; hardwareAcceleration?: HardwareAcceleration; fps?: number; width?: number; height?: number; start?: number; end?: number; bitrate?: number; audio?: boolean } = {}) => {
     if (C.video_export_active) throw new Error("已有导出任务在跑");
     if (!C.chart || !C.chart.data || !C.chart.data.judgeLineList) throw new Error("尚未载入谱面");
-    if (!window.VideoEncoder) throw new Error("此浏览器不支持 WebCodecs（VideoEncoder）");
 
     const m = C.chart.music;
     const fps = Math.min(120, Math.max(1, Math.round(opt.fps || 60)));
@@ -2620,7 +2376,8 @@ const export_video = async (opt: { fps?: number; width?: number; height?: number
     let end = opt.end != null ? +opt.end : dur;
     if (!(end > start)) end = Math.max(dur, start + 1);
     end = Math.min(end, Math.max(dur, start) + 10);          // 尾部最多多渲 10s
-    const total = Math.max(1, Math.ceil((end - start) * fps));
+    const plan = exportTimeline(start, end, opt, originalUI.duration('StartInfoFadeOut'));
+    const total = Math.max(1, Math.ceil(plan.duration * fps));
     const mbps = (opt.bitrate || 0) > 0 ? +opt.bitrate!
                                  : Math.max(1, w * h * fps * 0.08 / 1e6);
     const bitrate = Math.round(mbps * 1e6);
@@ -2628,6 +2385,13 @@ const export_video = async (opt: { fps?: number; width?: number; height?: number
 
     const was_playing = clock.running || !!(m && !m.paused && !m.ended);
     const prev_pos = clock_t();
+    const startedAt = sceneNow(), sceneBefore = { scene: C.scene, entrance: C.entrance ? { ...C.entrance } : null,
+        sceneTransition: { ...C.sceneTransition }, resumeAt: C.resumeAt, gameOverAt: C.gameOverAt, resultStarted: C.resultStarted };
+    const stageHidden = document.getElementById('stage')!.hidden, resultMusicWasPlaying = !!resultMusicSource;
+    const previousCanvas = document.createElement('canvas'); previousCanvas.width = cv.width; previousCanvas.height = cv.height;
+    previousCanvas.getContext('2d')!.drawImage(cv, 0, 0);
+    const scoringBefore = { ...C.chart.scoring }, hudBefore = { score: C.game_hud.score, combo: C.game_hud.combo };
+    const frozenBefore = C.fx_eff?._frozen;
     const clickedBeforeExport = new Map<RuntimeNote, boolean>(C.chart.data.judgeLineList
         .flatMap(line => line.notes).map(note => [note, note.clicked]));
 
@@ -2637,9 +2401,19 @@ const export_video = async (opt: { fps?: number; width?: number; height?: number
     video_export.status = "准备中…";
     video_export.perf0 = 0;
 
-    let venc: VideoEncoder | null = null;
+    const controller = new AbortController(); exportAbort = controller;
     try {
+        stopResultMusic();
         if (m) pause();
+        await originalUI.loadAvatar(settings.playerAvatar);
+        update_game_score(end + .2 - C.chart.data.offset + settings.offset / 1000);
+        const scoring = C.chart.scoring;
+        const view: Partial<SceneView> = {
+            // A zero score only reads the previous record; export never writes a new best.
+            tip: originalUI.nextTip(), previousBest: recordResult(C.chart.dir || C.chart.info.name, 0),
+            stats: { perfect: scoring.perfect, good: 0, bad: 0, miss: 0, score: scoring.score, combo: scoring.combo,
+                maxCombo: scoring.max_combo, accuracy: 100, total: scoring.total },
+        };
         preclick_notes(start);
         /* 异象冻帧闩锁（glitchDog 的 freezeTime）：从冻结点之后开渲时预置成「已冻结」，
            否则「冻帧当帧」的亮度/对比度 snap 会错跑到片段第一帧。 */
@@ -2649,123 +2423,52 @@ const export_video = async (opt: { fps?: number; width?: number; height?: number
         resize_canvases(w, h);
         render_frame_at(start);          // 预热：RT 按新尺寸重建、贴图上传（不计进度）
 
-        // ---- 音频轨：先离线渲完、编码完（几秒钟的活），chunks 攒着等视频同步入封装 ----
-        const aq: EncodedAudioChunk[] = [];
-        let audio_meta: { channels: number; codec_private: Uint8Array; codec_delay_ns: number } | null = null;
-        if (want_audio && m && typeof AudioEncoder === "function") {
-            try {
-                video_export.status = "渲染音频…";
-                export_ui_progress(true);
-                const rendered = await render_audio_48k(m.currentSrc || m.src, start, end);
-                video_export.status = "编码音频…";
-                export_ui_progress(true);
-                const out = await encode_audio_48k(rendered);
-                if (out.error) throw out.error;
-                if (out.chunks.length) {
-                    const head = out.desc || opus_head_fallback(out.channels);
-                    const preskip = (head && head.length >= 12) ? (head[10] | (head[11] << 8)) : 312;
-                    audio_meta = {
-                        channels: out.channels,
-                        codec_private: head,
-                        codec_delay_ns: Math.round(preskip / 48000 * 1e9)
-                    };
-                    aq.push(...out.chunks);
-                }
-            } catch (e) {
-                console.warn("音频轨导出失败，继续无音轨导出：", e);
-                aq.length = 0;
-                audio_meta = null;
-            }
+        const status = (message: string) => { video_export.status = message; export_ui_progress(true); };
+        let audio: AudioBuffer | undefined;
+        if (want_audio && m) {
+            status('渲染音频…');
+            audio = await renderAudio(await load_audio(m.currentSrc || m.src), resultMusicBuffers.get(resultMusicFile(C.chart.info.level)), plan, total / fps);
         }
-
-        // ---- 视频轨编码器：VP9 优先，退 VP8 ----
-        video_export.status = "探测编码器…";
-        export_ui_progress(true);
-        let vcodec: string | null = null;
-        for (const c of ["vp09.00.10.08", "vp8"]) {
-            try {
-                const s = await VideoEncoder.isConfigSupported({
-                    codec: c, width: w, height: h, bitrate, framerate: fps
-                });
-                if (s.supported) { vcodec = c; break; }
-            } catch (e) { /* 不支持就试下一个 */ }
-        }
-        if (!vcodec) throw new Error("此浏览器没有可用的 VP9/VP8 编码器");
-
-        const gw = webm_writer({
-            width: w, height: h,
-            video_codec: vcodec.startsWith("vp09") ? "V_VP9" : "V_VP8",
-            frame_ns: Math.round(1e9 / fps),
-            audio: audio_meta,
-            duration_ms: (end - start) * 1000      // 先写进 Info：播放器看时长靠它
-        });
-
-        const vq: EncodedVideoChunk[] = [];
-        let venc_err: unknown = null;
-        /* 按时间戳归并两轨再入封装，保证同一簇内块的时间单调
-           （音轨在视频之前整段就绪，只是在这里被拉平节奏） */
-        const pump = () => {
-            while (vq.length) {
-                if (aq.length && aq[0].timestamp <= vq[0].timestamp) gw.add_audio(aq.shift());
-                else gw.add_video(vq.shift());
-            }
-        };
-        venc = new VideoEncoder({
-            output: chunk => { vq.push(chunk); pump(); },
-            error: e => { venc_err = e; }
-        });
-        venc.configure({
-            codec: vcodec, width: w, height: h, bitrate, framerate: fps,
-            latencyMode: "quality"
-        });
-
-        video_export.status = "渲染视频…";
+        checkCancelled(controller.signal);
         video_export.perf0 = performance.now();
-        const frame_us = 1e6 / fps;
-        const key_every = Math.max(1, Math.round(fps * 2));    // 2s 一个关键帧（也决定簇节奏）
-        for (let i = 0; i < total; i++) {
-            if (C.video_export_cancelled) throw new Error("已取消");
-            if (venc_err) throw venc_err;
-            render_frame_at(start + i / fps);
-            const frame = new VideoFrame(cv, {
-                timestamp: Math.round(i * frame_us),
-                duration: Math.round(frame_us),
-                alpha: "discard"
-            });
-            venc.encode(frame, { keyFrame: i % key_every === 0 });
-            frame.close();
-            video_export.done = i + 1;
-            export_ui_progress();
-            // 每帧让出（见 wait_encoder 注释）+ 背压；取消/编码器错误在这里抛
-            await wait_encoder(venc, () => {
-                if (C.video_export_cancelled) throw new Error("已取消");
-                if (venc_err) throw venc_err;
-            });
-        }
-        await venc.flush();
-        pump();
-        while (aq.length) gw.add_audio(aq.shift());
-
-        video_export.status = "封装中…";
-        export_ui_progress(true);
-        video_export.blob = gw.finish();
-        video_export.name = export_filename(w, h, fps);
+        const output = await renderVideo(opt.backend || 'ffmpeg', {
+            width: w, height: h, fps, frames: total, bitrate, audio, signal: controller.signal, status,
+            encoding: opt.encoding, hardwareAcceleration: opt.hardwareAcceleration, browserCodec: opt.browserCodec,
+        }, cv, time => render_export_frame(plan, time, view), done => {
+            video_export.done = done; export_ui_progress();
+            events.dispatchEvent(new CustomEvent('exportframe', { detail: { index: done - 1, time: (done - 1) / fps, backend: opt.backend || 'ffmpeg' } }));
+        });
+        video_export.blob = output.blob;
+        video_export.name = export_filename(w, h, fps, output.extension);
         video_export.status = "完成";
         export_ui_progress(true);
         return video_export.blob;
     } catch (e) {
-        video_export.error = e;
-        throw e;
+        const error = controller.signal.aborted ? new Error("已取消") : e;
+        video_export.error = error;
+        throw error;
     } finally {
-        try { if (venc && venc.state !== "closed") venc.close(); } catch (e) {}
+        exportAbort = null;
         C.video_export_active = false;
         C.video_export_cancelled = false;
+        const exportSeconds = sceneNow() - startedAt;
+        Object.assign(C, sceneBefore);
+        C.sceneTransition.start += exportSeconds;
+        if (C.entrance) C.entrance.start += exportSeconds;
+        if (C.resumeAt) C.resumeAt += exportSeconds;
+        if (C.gameOverAt) C.gameOverAt += exportSeconds;
+        if (C.resultStarted) C.resultStarted += exportSeconds;
+        cv.dataset.scene = C.scene;
+        document.getElementById('stage')!.hidden = stageHidden;
         resize_to_window();
         clock_seek(prev_pos);
+        Object.assign(C.chart.scoring, scoringBefore); Object.assign(C.game_hud, hudBefore);
+        if (C.fx_eff) C.fx_eff._frozen = frozenBefore;
         for (const [note, clicked] of clickedBeforeExport) note.clicked = clicked;
         update_progress(prev_pos);
         // 立刻按窗口尺寸重画一帧（后台标签页 rAF 可能被挂起，不能等它）
-        try { render_frame_at(clock_t()); } catch (e) {}
+        cv.getContext('2d')!.drawImage(previousCanvas, 0, 0, cv.width, cv.height);
+        if (resultMusicWasPlaying && C.scene === 'result') startResultMusic(startedAt - sceneBefore.sceneTransition.start);
         export_ui_progress(true);
         if (was_playing && C.chart.music) { try { play(); } catch (e) {} }
     }
@@ -2802,6 +2505,16 @@ const export_open = () => ui.export_overlay.open;
 const auto_bitrate = (w, h, fps) => Math.max(1, Math.round(w * h * fps * 0.08 / 1e6));
 
 const export_collect_opt = () => ({
+    backend: ui.export_backend.value as ExportBackend,
+    encoding: {
+        codec: ui.export_codec.value, container: ui.export_container.value, rateControl: ui.export_rate_control.value,
+        crf: Number(ui.export_crf.value), preset: ui.export_preset.value, pixelFormat: ui.export_pixel_format.value,
+        proresProfile: Number(ui.export_prores_profile.value), audioCodec: ui.export_audio_codec.value,
+        audioBitrate: Number(ui.export_audio_bitrate.value), keyframeSeconds: Number(ui.export_keyframe.value),
+        threading: ui.export_threading.value, threads: Number(ui.export_threads.value),
+    } as EncodingOptions,
+    browserCodec: ui.export_browser_codec.value as BrowserCodec,
+    hardwareAcceleration: ui.export_hardware.value as HardwareAcceleration,
     width: parseInt(ui.export_w.value, 10) || 1920,
     height: parseInt(ui.export_h.value, 10) || 1080,
     fps: parseInt(ui.export_fps.value, 10) || 60,
@@ -2809,17 +2522,66 @@ const export_collect_opt = () => ({
     start: Math.max(0, parseFloat(ui.export_start.value) || 0),
     end: (parseFloat(ui.export_end.value) > 0)
         ? parseFloat(ui.export_end.value) : (C.chart.duration || 0),
-    audio: ui.export_audio.checked
+    audio: ui.export_audio.checked,
+    loading: ui.export_loading.checked,
+    result: ui.export_result.checked,
+    resultSeconds: parseFloat(ui.export_result_seconds.value) || 7,
 });
 
 const export_est_update = () => {
     const o = export_collect_opt();
-    const dur = Math.max(0, o.end - o.start);
+    ui.export_result_seconds.disabled = !o.result;
+    const dur = exportTimeline(o.start, o.end, o, originalUI.duration('StartInfoFadeOut')).duration;
     const n = Math.max(1, Math.ceil(dur * o.fps));
     const mbps = o.bitrate > 0 ? o.bitrate : auto_bitrate(o.width, o.height, o.fps);
     const mb = mbps * 1e6 / 8 * dur / 1048576;
-    ui.export_est.textContent =
-        `约 ${n} 帧 · ${mbps} Mbps${o.bitrate > 0 ? "" : "（自动）"} · 预计 ${mb.toFixed(0)} MB`;
+    const quality = o.backend === 'ffmpeg' && o.encoding.rateControl === 'crf' && !['prores', 'ffv1'].includes(o.encoding.codec);
+    ui.export_est.textContent = quality ? `约 ${n} 帧 · CRF ${o.encoding.crf} · 文件大小随内容变化`
+        : o.backend === 'ffmpeg' && ['prores', 'ffv1'].includes(o.encoding.codec) ? `约 ${n} 帧 · 文件大小随内容变化`
+        : `约 ${n} 帧 · ${mbps} Mbps${o.bitrate > 0 ? "" : "（自动）"} · 预计 ${mb.toFixed(0)} MB`;
+};
+
+const export_encoding_update = () => {
+    const ffmpeg = ui.export_backend.value === 'ffmpeg', codec = ui.export_codec.value as FFmpegCodec;
+    if (codec === 'hevc' && (!crossOriginIsolated || ui.export_threading.value === 'single')) {
+        ui.export_codec.value = 'h264'; export_encoding_update(); return;
+    }
+    for (const option of ui.export_threading.options) if (option.value === 'multi') option.disabled = !crossOriginIsolated || codec === 'vp9';
+    if (ui.export_threading.value === 'multi' && (!crossOriginIsolated || codec === 'vp9')) ui.export_threading.value = 'auto';
+    document.getElementById('exp-ffmpeg-options')!.hidden = !ffmpeg;
+    document.getElementById('exp-browser-options')!.hidden = ffmpeg;
+    const format = videoFormats[codec], fixed = codec === 'ffv1' || codec === 'prores';
+    const selectAllowed = (select: HTMLSelectElement, allowed: readonly string[]) => {
+        for (const option of select.options) option.disabled = !allowed.includes(option.value);
+        if (!allowed.includes(select.value)) select.value = allowed[0];
+    };
+    selectAllowed(ui.export_container, format.containers);
+    selectAllowed(ui.export_pixel_format, format.pixels);
+    const container = ui.export_container.value;
+    selectAllowed(ui.export_audio_codec, container === 'mp4' ? ['auto','aac'] : container === 'webm' ? ['auto','opus'] : container === 'mov' ? ['auto','aac','pcm'] : ['auto','aac','opus','flac','pcm']);
+    ui.export_rate_control.disabled = fixed;
+    ui.export_crf.disabled = fixed || ui.export_rate_control.value !== 'crf';
+    ui.export_crf.max = codec === 'vp9' ? '63' : '51';
+    ui.export_preset.disabled = fixed;
+    ui.export_prores_profile.disabled = codec !== 'prores';
+    ui.export_bitrate.disabled = ffmpeg && (fixed || ui.export_rate_control.value === 'crf');
+    ui.export_threads.disabled = !crossOriginIsolated || ui.export_threading.value === 'single' || codec === 'vp9' || ui.export_threading.value === 'auto' && codec !== 'hevc';
+    for (const option of ui.export_codec.options) if (option.value === 'hevc') option.disabled = !crossOriginIsolated || ui.export_threading.value === 'single';
+    document.getElementById('exp-thread-status')!.textContent = crossOriginIsolated ? '多线程环境可用（CPU 编码）' : '当前为单线程环境；启用多线程后可使用 HEVC。';
+    if (navigator.serviceWorker?.controller?.scriptURL.endsWith('/isolation-service-worker.js')) ui.export_isolation.textContent = '关闭多线程模式并刷新';
+    export_est_update();
+};
+
+let exportProbeSequence = 0;
+const export_probe = async () => {
+    const sequence = ++exportProbeSequence;
+    const label = document.getElementById('exp-capabilities')!;
+    label.textContent = '检测中…';
+    const { browserCapabilities } = await import('./export/browser-codec');
+    const supported = await browserCapabilities(Number(ui.export_w.value), Number(ui.export_h.value), Number(ui.export_fps.value), ui.export_hardware.value);
+    if (sequence !== exportProbeSequence) return;
+    label.textContent = supported.length ? `当前分辨率可用：${supported.map(name => name.toUpperCase()).join('、')}（浏览器能力检测）` : '当前分辨率及硬件偏好没有可用编码器。';
+    for (const option of ui.export_browser_codec.options) option.disabled = option.value !== 'auto' && !supported.includes(option.value);
 };
 
 const open_export_panel = () => {
@@ -2834,6 +2596,7 @@ const open_export_panel = () => {
     ui.export_progress_wrap.hidden = true;
     ui.export_status.textContent = "";
     export_est_update();
+    export_encoding_update();
     ui.export_overlay.showModal();
 };
 
@@ -2845,6 +2608,7 @@ const close_export_panel = () => {
 const export_cancel = () => {
     if (!C.video_export_active) return;
     C.video_export_cancelled = true;
+    exportAbort?.abort();
     ui.export_status.textContent = "正在取消…";
 };
 
@@ -2881,6 +2645,7 @@ const rebuild_click_effects = () => {
     data.click_effect_collection = [];
     let effectId = 1;
     for (const line of data.judgeLineList) for (const note of line.notes) {
+        if (note.isFake) continue;
         note.effectId = effectId++;
         data.click_effect_collection.push(createHitEffect(note, note.sect, 'perfect'));
         if (note.is_hold) for (const time of autoplayHoldTimes(note, settings.speed)) {
@@ -2893,6 +2658,7 @@ const rebuild_click_effects = () => {
 const init_chart = () => {
     const data = C.chart.data;
     const note_sect_counter = new Map();
+    const lineState = createLineStateResolver(data.judgeLineList);
 
     for (const line of data.judgeLineList) {
         line.speedEvents.sort((a, b) => a.startTime - b.startTime);
@@ -2903,12 +2669,7 @@ const init_chart = () => {
         line.sec2beat = function (t) { return t / (C.units.pgrbeat / this.bpm); };
         line.beat2sec = function (t) { return t * (C.units.pgrbeat / this.bpm); };
         line.get_state = function (t) {
-            const beatt = this.sec2beat(t);
-            const rotate = get_event_val(beatt, this.judgeLineRotateEvents, "start", "end") * -1;
-            const x = get_event_val(beatt, this.judgeLineMoveEvents, "start", "end");
-            const y = 1.0 - get_event_val(beatt, this.judgeLineMoveEvents, "start2", "end2");
-            const alpha = get_event_val(beatt, this.judgeLineDisappearEvents, "start", "end");
-            return [rotate, x, y, alpha];
+            return lineState(this, t);
         };
 
         init_speed_events(line.speedEvents);
@@ -2924,8 +2685,10 @@ const init_chart = () => {
             note.clicked = false;
             note.master = line;
 
-            if (!note_sect_counter.has(note.sect)) note_sect_counter.set(note.sect, 0);
-            note_sect_counter.set(note.sect, note_sect_counter.get(note.sect) + 1);
+            if (!note.isFake) {
+                if (!note_sect_counter.has(note.sect)) note_sect_counter.set(note.sect, 0);
+                note_sect_counter.set(note.sect, note_sect_counter.get(note.sect) + 1);
+            }
         }
 
         delete line.notesAbove;
@@ -2934,7 +2697,7 @@ const init_chart = () => {
 
     for (const line of data.judgeLineList) {
         for (const note of line.notes) {
-            note.morebets = +(note_sect_counter.get(note.sect) > 1);
+            note.morebets = +(!note.isFake && note_sect_counter.get(note.sect) > 1);
         }
     }
 
@@ -2961,7 +2724,7 @@ const init_chart = () => {
     let dur = C.chart.music.duration || 0;
     for (const b of C.chart.blocks) dur = Math.max(dur, b.disappearTime);
     for (const line of data.judgeLineList) {
-        for (const note of line.notes) dur = Math.max(dur, note.hold_end_time);
+        for (const note of line.notes) dur = Math.max(dur, note.hold_end_time + data.offset);
     }
     C.chart.duration = dur;
 
@@ -3109,6 +2872,7 @@ const init_game_score = () => {
     const times: number[] = [];
     for (const line of C.chart.data.judgeLineList) {
         for (const note of line.notes) {
+            if (note.isFake) continue;
             times.push(note.is_hold ? Math.max(note.sect, note.hold_end_time - 0.22) : note.sect);
         }
     }
@@ -3255,7 +3019,7 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
     ctx.restore();
 };
 
-const drawGameplayTransition = (ctx: CanvasRenderingContext2D, elapsed: number, ending: boolean) => {
+const drawGameplayTransition = (ctx: CanvasRenderingContext2D, elapsed: number, ending: boolean, musicTime = get_time()) => {
     const width = cv.width, height = cv.height, clip = ending ? 'LevelOver' : 'LevelStart_0';
     ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, width, height);
     ctx.drawImage(game_background(width, height).canvas, 0, 0);
@@ -3265,13 +3029,13 @@ const drawGameplayTransition = (ctx: CanvasRenderingContext2D, elapsed: number, 
         : originalUI.sample('Began', 'JudgeLine', 'm_ScaleCurves', elapsed, 1, 'x');
     const lineVisible = elapsed < originalUI.duration('Began');
     if (ending && lineScale > 0) {
-        const time = get_time() - C.chart.data.offset;
+        const time = musicTime - C.chart.data.offset;
         render_scene(C.scene_cv.getContext('2d'), time, 'fg');
         ctx.save(); ctx.translate(width / 2, 0); ctx.scale(lineScale, 1);
         ctx.drawImage(C.scene_cv, -width / 2, 0); ctx.restore();
     }
     if (!ending && originalUI.sample('Began', 'GameObjectCanvas', 'm_IsActive', elapsed, 0) > .5) {
-        render_scene(C.scene_cv.getContext('2d'), get_time() - C.chart.data.offset, 'fg');
+        render_scene(C.scene_cv.getContext('2d'), musicTime - C.chart.data.offset, 'fg');
         ctx.drawImage(C.scene_cv, 0, 0);
     }
     if (!ending && lineVisible && lineScale > 0) {
@@ -3281,15 +3045,14 @@ const drawGameplayTransition = (ctx: CanvasRenderingContext2D, elapsed: number, 
     const scaleY = originalUI.sample(clip, '', 'm_ScaleCurves', elapsed, 1, 'y');
     const comboAlpha = originalUI.sample(clip, 'Canvas (1)/ComboText', 'm_Color.a', elapsed, 1);
     const side = originalUI.sample(clip, null, 'spriteBlending', elapsed, .8);
-    draw_game_hud(ctx, get_time(), scaleY, comboAlpha, Math.max(0, Math.min(1, (side - .5) / .3)));
+    draw_game_hud(ctx, musicTime, scaleY, comboAlpha, Math.max(0, Math.min(1, (side - .5) / .3)));
     ctx.restore();
 };
 
 // All UI geometry and curves come from the exported Unity scene hierarchy.
-const drawSceneOverlay = (ctx: CanvasRenderingContext2D) => {
+const drawSceneOverlay = (ctx: CanvasRenderingContext2D, scene = C.scene, elapsed = sceneNow() - C.sceneTransition.start, overrides: Partial<SceneView> = {}) => {
     const transition = C.sceneTransition;
-    const elapsed = sceneNow() - transition.start;
-    const inLoading = C.scene === 'loading' || C.scene === 'loading-exit';
+    const inLoading = scene === 'loading' || scene === 'loading-exit';
     const image = inLoading ? C.loadingImage || C.chart.image : C.chart.image;
     const view = {
         info: inLoading ? C.loadingInfo || C.chart.info || { name: '', level: '' } : C.chart.info,
@@ -3303,11 +3066,12 @@ const drawSceneOverlay = (ctx: CanvasRenderingContext2D) => {
         previousBest: C.previousBest || 0,
         showName: settings.playerShowName,
         tip: C.loadingTip,
+        ...overrides,
     };
-    if (C.scene === 'loading') originalUI.render(ctx, 'loading', { ...view, elapsed: 3.5, loadingTime: elapsed });
-    else if (C.scene === 'loading-exit') originalUI.render(ctx, 'loading', { ...view, elapsed: 4 + elapsed, loadingTime: loadingDisplaySeconds + elapsed, fadeTime: elapsed });
-    else if (C.scene === 'pause') originalUI.render(ctx, 'pause', { ...view, frame: C.pauseSnapshot || C.scene_cv });
-    else if (C.scene === 'result') originalUI.render(ctx, 'result', view);
+    if (scene === 'loading') originalUI.render(ctx, 'loading', { ...view, elapsed: 3.5, loadingTime: elapsed });
+    else if (scene === 'loading-exit') originalUI.render(ctx, 'loading', { ...view, elapsed: 4 + elapsed, loadingTime: loadingDisplaySeconds + elapsed, fadeTime: elapsed });
+    else if (scene === 'pause') originalUI.render(ctx, 'pause', { ...view, frame: C.pauseSnapshot || C.scene_cv });
+    else if (scene === 'result') originalUI.render(ctx, 'result', view);
     else if (transition.kind === 'pause-out' && elapsed < originalUI.duration('Continue')) {
         originalUI.render(ctx, 'continue', { ...view, frame: C.pauseSnapshot || C.scene_cv });
     } else if (transition.kind === 'loading-out' && elapsed < originalUI.duration('StartInfoFadeOut')) {
@@ -3442,6 +3206,7 @@ let lib_loading = false;
 
 const open_library = () => {
     if (lib_loading) return;
+    stopResultMusic();
     pause();
     events.dispatchEvent(new Event('library'));
 };
@@ -3466,6 +3231,7 @@ const init_player = async () => {
         ["assets/audio/click.ogg", async () => C.click_sounds[C.note.tap] = await load_audio(R("/assets/audio/click.ogg"))],
         ["assets/audio/drag.ogg", async () => C.click_sounds[C.note.drag] = await load_audio(R("/assets/audio/drag.ogg"))],
         ["assets/audio/flick.ogg", async () => C.click_sounds[C.note.flick] = await load_audio(R("/assets/audio/flick.ogg"))],
+        ...resultMusicFiles.map(file => [file, async () => { resultMusicBuffers.set(file, await load_audio(R(file))); }] as [string, () => Promise<unknown>]),
         ...["click", "drag", "hold", "flick", "click_mh", "drag_mh", "hold_mh", "flick_mh"].map(key =>
             [`assets/gameplay/notes/${key}.png`, async () => C.note_imgs[key] = await load_img(R(`/assets/gameplay/notes/${key}.png`))] as [string, () => Promise<unknown>]),
         ["assets/gameplay/notes/bad_tap.png", async () => {
@@ -3601,10 +3367,23 @@ const init_player = async () => {
     ui.export_overlay.onclick = e => {
         if (e.target === ui.export_overlay) close_export_panel();
     };
-    for (const key of ["export_w", "export_h", "export_fps", "export_bitrate", "export_start", "export_end"]) {
+    for (const key of ["export_w", "export_h", "export_fps", "export_bitrate", "export_start", "export_end", "export_result_seconds"]) {
         ui[key].addEventListener("input", export_est_update);
     }
+    for (const key of ['export_w','export_h','export_fps']) ui[key].addEventListener('input', () => {
+        exportProbeSequence++;
+        document.getElementById('exp-capabilities')!.textContent = '参数已更改，可重新检测编码支持。';
+        for (const option of ui.export_browser_codec.options) option.disabled = false;
+    });
     ui.export_audio.addEventListener("change", export_est_update);
+    for (const key of ['export_backend','export_codec','export_container','export_rate_control','export_preset','export_pixel_format','export_prores_profile','export_audio_codec']) ui[key].addEventListener('change', export_encoding_update);
+    for (const key of ['export_crf','export_audio_bitrate','export_keyframe']) ui[key].addEventListener('input', export_est_update);
+    ui.export_probe.onclick = () => { void export_probe(); };
+    ui.export_hardware.onchange = () => { void export_probe(); };
+    ui.export_threading.onchange = export_encoding_update;
+    ui.export_isolation.onclick = () => { void import('./export/isolation').then(module => module.toggleIsolation()).catch(error => { ui.export_status.textContent = String(error); }); };
+    ui.export_loading.addEventListener("change", export_est_update);
+    ui.export_result.addEventListener("change", export_est_update);
     ui.export_p720.onclick = () => { ui.export_w.value = "1280"; ui.export_h.value = "720"; export_est_update(); };
     ui.export_p1080.onclick = () => { ui.export_w.value = "1920"; ui.export_h.value = "1080"; export_est_update(); };
     ui.export_pwin.onclick = () => {
@@ -3736,6 +3515,7 @@ export const simulator = {
         const modeChanged = settings.autoplay !== value.autoplay;
         const speedChanged = settings.speed !== value.speed;
         settings = { ...value };
+        resultMusicGain.gain.value = settings.volume;
         const profileReady = originalUI.loadAvatar(settings.playerAvatar).catch(error => {
             events.dispatchEvent(new CustomEvent('error', { detail: `无法载入头像：${error.message}` }));
         });
