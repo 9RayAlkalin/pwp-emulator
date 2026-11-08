@@ -2219,7 +2219,7 @@ const render = () => {
                     C.sceneTransition.start = C.entrance.start + loadingDisplaySeconds;
                 } else if (phase === 'opening' && C.scene !== 'game-opening') {
                     transitionScene('game-opening');
-                    C.sceneTransition.start = C.entrance.start + loadingDisplaySeconds + originalUI.duration('StartInfoFadeOut');
+                    C.sceneTransition.start = C.entrance.start + (C.entrance.skip ? 0 : loadingDisplaySeconds + originalUI.duration('StartInfoFadeOut'));
                 } else if (phase === 'game') {
                     C.entrance = null;
                     C.scene = 'game'; cv.dataset.scene = 'game'; C.sceneTransition.duration = 0;
@@ -2236,11 +2236,6 @@ const render = () => {
                 // Loading prepares resources only; Start is the first canvas drawing operation.
             } else if (C.scene === 'loading' || C.scene === 'loading-exit') {
                 drawSceneOverlay(cv.getContext('2d')!);
-                if (C.entrance && !C.entrance.painted) {
-                    C.entrance.painted = true;
-                    C.entrance.start = sceneNow();
-                    C.sceneTransition.start = C.entrance.start;
-                }
             } else if (C.scene === 'game-opening' || C.scene === 'game-over') {
                 drawGameplayTransition(cv.getContext('2d')!, sceneNow() - C.sceneTransition.start, C.scene === 'game-over');
             } else if (C.chart.data) {
@@ -2253,6 +2248,11 @@ const render = () => {
                 out.fillStyle = '#fff'; out.font = `${Math.max(18, cv.height / 22)}px PhiHUD, sans-serif`; out.textAlign = 'center';
                 out.fillText('Loading...', cv.width / 2, cv.height / 2);
                 drawSceneOverlay(out);
+            }
+            if (C.entrance && !C.entrance.painted) {
+                C.entrance.painted = true;
+                C.entrance.start = sceneNow();
+                C.sceneTransition.start = C.entrance.start;
             }
             events.dispatchEvent(new CustomEvent('frame', { detail: simulator.snapshot() }));
             if (clock.running && t_raw >= C.chart.duration + .2 && !finishSent) {
@@ -3373,6 +3373,12 @@ const startMusic = () => {
     ui.btn_play.textContent = "暂停";
 };
 
+const beginEntrance = (skipLoading: boolean) => {
+    C.entrance = { start: sceneNow(), skip: skipLoading, painted: false };
+    transitionScene(skipLoading ? 'game-opening' : 'loading');
+    ui.btn_play.textContent = skipLoading ? '开始中…' : '加载中…';
+};
+
 const play = () => {
     if (!C.chart.music || lib_loading || C.video_export_active || C.entrance || C.resumeAt) return;
     void actx.resume();
@@ -3382,14 +3388,7 @@ const play = () => {
     if (settings.fullscreen && !document.fullscreenElement) void stage.requestFullscreen().catch(() => {});
     if (C.scene === 'ready') {
         C.loadingTip = originalUI.nextTip();
-        C.entrance = { start: sceneNow(), skip: settings.skipLoadingAnimation, painted: false };
-        if (settings.skipLoadingAnimation) {
-            C.entrance = null; C.scene = 'game'; cv.dataset.scene = 'game'; C.sceneTransition.duration = 0;
-            startMusic();
-        } else {
-            transitionScene('loading');
-            ui.btn_play.textContent = '加载中…';
-        }
+        beginEntrance(settings.skipLoadingAnimation);
         return;
     }
     if (C.scene === 'pause') {
@@ -3773,11 +3772,7 @@ export const simulator = {
         if (!C.chart.data || C.video_export_active || lib_loading) return;
         pause(); C.entrance = null; C.resumeAt = 0; C.gameOverAt = 0; C.resultStats = null;
         seek(0); document.getElementById('stage')!.hidden = false;
-        if (settings.skipLoadingAnimation) { transitionScene('game'); C.sceneTransition.kind = 'none'; startMusic(); }
-        else {
-            transitionScene('game-opening');
-            C.entrance = { start: sceneNow() - loadingDisplaySeconds - originalUI.duration('StartInfoFadeOut'), skip: false, painted: true };
-        }
+        beginEntrance(true);
     },
     hit(id: string, x: number, y: number, kind: 'tap' | 'move' | 'release', keyboard = false) {
         if (!clock.running || settings.autoplay || C.video_export_active || lib_loading || export_open()) return;

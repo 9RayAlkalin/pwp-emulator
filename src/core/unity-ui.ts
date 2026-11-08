@@ -371,19 +371,28 @@ export class UnityUI {
     const tint = data.color || { r: 0, g: 0, b: 0, a: .4 };
     const alpha = tint.a * (data.useCasterAlpha ? patch['m_Color.a'] ?? graphic.data.m_Color.a : 1);
     if (alpha <= 0) return;
-    const key = JSON.stringify([size, pivot, graphic.points, data]);
+    const key = JSON.stringify([size, pivot, graphic.points, graphic.sprite, data]);
     let cached = this.shadows.get(key);
     if (!cached) {
       const padding = Math.ceil(data.size * 2 + 8), x = -pivot.x * size.x - padding, y = -pivot.y * size.y - padding;
       const mask = document.createElement('canvas'); mask.width = Math.ceil(size.x + padding * 2); mask.height = Math.ceil(size.y + padding * 2);
-      let out = mask.getContext('2d')!;
-      out.translate(-x + (data.offset?.x || 0), -y + (data.offset?.y || 0));
-      out.fillStyle = color(tint); out.fill(shape);
+      const caster = graphic.points?.length ? undefined : this.sprite(graphic, tint);
+      const imprint = (out: CanvasRenderingContext2D, offsetX = 0, offsetY = 0) => {
+        out.save(); out.translate(-x + offsetX, -y + offsetY);
+        if (caster) {
+          out.translate(-pivot.x * size.x, (1 - pivot.y) * size.y); out.scale(1, -1);
+          out.drawImage(caster, 0, 0, size.x, size.y);
+        } else { out.fillStyle = color(tint); out.fill(shape); }
+        out.restore();
+      };
+      imprint(mask.getContext('2d')!, data.offset?.x || 0, data.offset?.y || 0);
       const config = shadowBlurConfig(data.size);
       const image = efficientBlur(mask, config.radius, config.iteration);
-      out = image.getContext('2d')!; out.translate(-x, -y);
-      // TrueShadow/PostProcess alpha = blurredAlpha * (1 - imprintAlpha).
-      out.globalAlpha = 1; out.globalCompositeOperation = 'destination-out'; out.fill(shape);
+      // TrueShadow.get_Cutout also enables cutout when the shadow is not a sibling.
+      if (!data.shadowAsSibling || data.cutout) {
+        const out = image.getContext('2d')!;
+        out.globalCompositeOperation = 'destination-out'; imprint(out);
+      }
       cached = { image, x, y }; this.shadows.set(key, cached);
     }
     ctx.save(); ctx.globalAlpha *= alpha; ctx.drawImage(cached.image, cached.x, cached.y); ctx.restore();

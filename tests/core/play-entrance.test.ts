@@ -17,7 +17,10 @@ describe('start button scene flow', () => {
     expect(entrancePhase(10, 14, false, 1)).toBe('game');
   });
 
-  it('starts directly in gameplay when the animation is skipped', () => {
-    expect(entrancePhase(10, 10, true, 1)).toBe('game');
+  it('skips loading while retaining the gameplay entrance and audio delay', () => {
+    expect(entrancePhase(10, 10, true, 1)).toBe('opening');
+    expect(entrancePhase(10, 11.499, true, 1)).toBe('opening');
+    expect(entrancePhase(10, 11.5, true, 1)).toBe('game');
+    expect(entrancePhase(10, 11.5, true, 20)).toBe('game');
   });
 });
