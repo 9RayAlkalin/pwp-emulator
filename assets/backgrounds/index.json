@@ -1,0 +1,134 @@
+{
+  "charts": {
+    "/assets/library/Ametrine.GRYSCLMIssionary/EZ": "/assets/backgrounds/bg_00.png",
+    "/assets/library/Ametrine.GRYSCLMIssionary/HD": "/assets/backgrounds/bg_00.png",
+    "/assets/library/Ametrine.GRYSCLMIssionary/IN": "/assets/backgrounds/bg_00.png",
+    "/assets/library/Ametrine.GRYSCLMIssionary/AT": "/assets/backgrounds/bg_00.png",
+    "/assets/library/DesultorySignals.technoplanet/EZ": "/assets/backgrounds/bg_01.png",
+    "/assets/library/DesultorySignals.technoplanet/HD": "/assets/backgrounds/bg_01.png",
+    "/assets/library/DesultorySignals.technoplanet/IN": "/assets/backgrounds/bg_01.png",
+    "/assets/library/DesultorySignals.technoplanet/AT": "/assets/backgrounds/bg_01.png",
+    "/assets/library/Message/EZ": "/assets/backgrounds/bg_02.png",
+    "/assets/library/Message/HD": "/assets/backgrounds/bg_02.png",
+    "/assets/library/Message/IN": "/assets/backgrounds/bg_02.png",
+    "/assets/library/Message/AT": "/assets/backgrounds/bg_02.png",
+    "/assets/library/Message/SP": "/assets/backgrounds/bg_02.png",
+    "/assets/library/Petrichor.voidMournfinale/EZ": "/assets/backgrounds/bg_03.png",
+    "/assets/library/Petrichor.voidMournfinale/HD": "/assets/backgrounds/bg_03.png",
+    "/assets/library/Petrichor.voidMournfinale/IN": "/assets/backgrounds/bg_03.png",
+    "/assets/library/Petrichor.voidMournfinale/AT": "/assets/backgrounds/bg_03.png",
+    "/assets/library/TrueHomeTrueWorldRework.816ThreeNumbers/EZ": "/assets/backgrounds/bg_04.png",
+    "/assets/library/TrueHomeTrueWorldRework.816ThreeNumbers/HD": "/assets/backgrounds/bg_04.png",
+    "/assets/library/TrueHomeTrueWorldRework.816ThreeNumbers/IN": "/assets/backgrounds/bg_04.png",
+    "/assets/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/EZ": "/assets/backgrounds/bg_05.png",
+    "/assets/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/HD": "/assets/backgrounds/bg_06.png",
+    "/assets/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/IN": "/assets/backgrounds/bg_07.png",
+    "/assets/library/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft/AT": "/assets/backgrounds/bg_08.png",
+    "/assets/library/rNFrums/EZ": "/assets/backgrounds/bg_09.png",
+    "/assets/library/rNFrums/HD": "/assets/backgrounds/bg_09.png",
+    "/assets/library/rNFrums/IN": "/assets/backgrounds/bg_09.png",
+    "/assets/library/rNFrums/AT": "/assets/backgrounds/bg_09.png"
+  },
+  "sources": [
+    {
+      "path": "/assets/backgrounds/bg_00.png",
+      "key": "Assets/Tracks/Ametrine.GRYSCLMIssionary.0/IllustrationBlur.jpg",
+      "bundle": "e4ca162d2288243ea5c7d0b985fc7609.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_01.png",
+      "key": "Assets/Tracks/DesultorySignals.technoplanet.0/IllustrationBlur.jpg",
+      "bundle": "fa5cd4a612a767a41579ad86d6d2f793.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_02.png",
+      "key": "Assets/Tracks/Message.くるぶっこちゃん.0/IllustrationBlur.jpg",
+      "bundle": "53c842f4fb0550af51bacb721ac4a5e4.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_03.png",
+      "key": "Assets/Tracks/Petrichor.voidMournfinale.0/IllustrationBlur.jpg",
+      "bundle": "dbf9632f3c1a5111a8ae92edc3f61ebb.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_04.png",
+      "key": "Assets/Tracks/TrueHomeTrueWorldRework.816ThreeNumbers.0/IllustrationBlur.jpg",
+      "bundle": "10debad053a2d2a3400737d969b03eb3.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_05.png",
+      "key": "Assets/Tracks/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft安月名莉子大瀬良あい.0/IllustrationBlur_EZ.jpg",
+      "bundle": "ee1cea44b0d5f2264031ae3ed60882aa.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_06.png",
+      "key": "Assets/Tracks/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft安月名莉子大瀬良あい.0/IllustrationBlur_HD.jpg",
+      "bundle": "93bbbe9e54d9f49f0d18b0aaef3fe999.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_07.png",
+      "key": "Assets/Tracks/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft安月名莉子大瀬良あい.0/IllustrationBlur_IN.jpg",
+      "bundle": "925606ba2db0cb848fa30bc41740794f.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_08.png",
+      "key": "Assets/Tracks/WhatdoyouwantmorethanaHappyending.Apo11oHALOprogramft安月名莉子大瀬良あい.0/IllustrationBlur_AT.jpg",
+      "bundle": "8f83318dbe9fc2086b63e383b432ebe0.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    },
+    {
+      "path": "/assets/backgrounds/bg_09.png",
+      "key": "Assets/Tracks/ハテ.rNFrums.0/IllustrationBlur.jpg",
+      "bundle": "15f96395f8a5ccba8db1bd6710a4b457.bundle",
+      "size": [
+        256,
+        135
+      ],
+      "pixelsPerUnit": 6.25
+    }
+  ]
+}

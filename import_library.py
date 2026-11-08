@@ -4,13 +4,13 @@ r"""谱面库导入：把 devcharts/*.pez 解包成 webplayer 可直接 load_cha
 用法: py import_library.py [--no-clean]      （路径基于本文件，不依赖 cwd）
 
 产物（**按歌曲共享资源**，不再每难度各存一份曲绘+音乐）:
-  res/library/index.json                <- 清单
-  res/library/<song>/music.ogg          <- 音频，每首歌只存一份（实测每歌内逐难度完全一致）
-  res/library/<song>/image.png          <- 曲绘；仅当该歌所有难度曲绘一致时才有
-  res/library/<song>/<DIFF>/chart.json  <- 谱面 JSON
-  res/library/<song>/<DIFF>/info.json   <- info.yml 重整（name/level/music + 原字段）
-  res/library/<song>/<DIFF>/postfx.json <- 内容 null（见下）
-  res/library/<song>/<DIFF>/image.png   <- 仅当该歌曲绘不一致时才逐难度各存一份
+  assets/library/index.json                <- 清单
+  assets/library/<song>/music.ogg          <- 音频，每首歌只存一份（实测每歌内逐难度完全一致）
+  assets/library/<song>/image.png          <- 曲绘；仅当该歌所有难度曲绘一致时才有
+  assets/library/<song>/<DIFF>/chart.json  <- 谱面 JSON
+  assets/library/<song>/<DIFF>/info.json   <- info.yml 重整（name/level/music + 原字段）
+  assets/library/<song>/<DIFF>/postfx.json <- 内容 null（见下）
+  assets/library/<song>/<DIFF>/image.png   <- 仅当该歌曲绘不一致时才逐难度各存一份
 
 清单条目:
   path   谱面目录（chart.json / info.json 在这里）
@@ -42,12 +42,12 @@ import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEVCHARTS = os.path.join(ROOT, "devcharts")
-RES = os.path.join(ROOT, "res")
-LIB = os.path.join(RES, "library")
+ASSETS = os.path.join(ROOT, "assets")
+LIB = os.path.join(ASSETS, "library")
 INDEX = os.path.join(LIB, "index.json")
 
 DIFF_RANK = {"EZ": 0, "HD": 1, "IN": 2, "AT": 3, "SP": 4}
-BUILTIN_S6 = os.path.join(RES, "s6")
+BUILTIN_S6 = os.path.join(ASSETS, "builtin", "s6")
 
 
 def parse_yml(text):
@@ -99,7 +99,7 @@ def md5(data):
 
 
 def clean(force):
-    """res/library 是纯派生物（AGENTS.md 明确写了「删了重跑导入即可」）。
+    """assets/library 是纯派生物（AGENTS.md 明确写了「删了重跑导入即可」）。
 
     只在它带着我们自己的 index.json 标记时才删，否则拒绝（防手滑删错东西）。
     """
@@ -109,7 +109,7 @@ def clean(force):
     looks_ours = "index.json" in entries
     if not looks_ours and not force:
         raise SystemExit(
-            "res/library 里没有 index.json，不像本脚本的产物，已拒绝删除。\n"
+            "assets/library 里没有 index.json，不像本脚本的产物，已拒绝删除。\n"
             "确认无误就加 --force 重跑。")
     shutil.rmtree(LIB)
 
@@ -117,9 +117,9 @@ def clean(force):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-clean", action="store_true",
-                    help="不先删 res/library（会残留旧布局的目录）")
+                    help="不先删 assets/library（会残留旧布局的目录）")
     ap.add_argument("--force", action="store_true",
-                    help="即使 res/library 没有 index.json 也允许删除")
+                    help="即使 assets/library 没有 index.json 也允许删除")
     args = ap.parse_args()
 
     pez = sorted(glob.glob(os.path.join(DEVCHARTS, "*.pez")))
@@ -206,7 +206,7 @@ def main():
             report.write("NOTE %s: image.png 逐难度不同（%d 种），各存一份\n"
                          % (song_slug, len(images)))
 
-        report.write("\n== %s  (%d 难度)  -> res/library/%s\n"
+        report.write("\n== %s  (%d 难度)  -> assets/library/%s\n"
                      % (g["song"], len(items), song_slug))
         for e in items:
             dslug = slugify(e["diff"], set())          # DIFF 本身已安全
@@ -226,13 +226,13 @@ def main():
                 with open(os.path.join(cdir, "image.png"), "wb") as f:
                     f.write(e["image"])
 
-            asset = "/res/library/" + song_slug
+            asset = "/assets/library/" + song_slug
             if not share_music:
                 with open(os.path.join(cdir, "music.ogg"), "wb") as f:
                     f.write(e["music"])
-                asset = "/res/library/%s/%s" % (song_slug, dslug)
+                asset = "/assets/library/%s/%s" % (song_slug, dslug)
             entries.append({
-                "path": "/res/library/%s/%s" % (song_slug, dslug),
+                "path": "/assets/library/%s/%s" % (song_slug, dslug),
                 "asset": asset,
                 "cover": ("%s/image.png" % asset) if (share_image or not share_music)
                          else ("%s/%s/image.png" % (song_slug, dslug)),
@@ -254,9 +254,9 @@ def main():
         s6 = json.load(open(s6_info_path, encoding="utf-8"))
         m = re.match(r"\s*([A-Za-z]{2})\b", s6.get("level", ""))
         entries.append({
-            "path": "/res/s6",
-            "asset": "/res/s6",
-            "cover": "/res/s6/image.png",
+            "path": "/assets/builtin/s6",
+            "asset": "/assets/builtin/s6",
+            "cover": "/assets/builtin/s6/image.png",
             "name": s6.get("name", "s6"),
             "song": "s6 (built-in)",
             "difficulty": m.group(1).upper() if m else "?",
@@ -264,7 +264,7 @@ def main():
             "composer": "",
             "charter": "",
         })
-        report.write("\nOK   built-in /res/s6\n")
+        report.write("\nOK   built-in /assets/builtin/s6\n")
 
     entries.sort(key=lambda e: (e["name"].lower(), DIFF_RANK.get(e["difficulty"], 9),
                                 e["path"]))
@@ -279,10 +279,10 @@ def main():
         return t
 
     report.write("\ntotal=%d  index=%s\n" % (len(entries), INDEX))
-    report.write("res/library total = %.1f MB\n" % (tree_bytes(LIB) / 1048576.0))
+    report.write("assets/library total = %.1f MB\n" % (tree_bytes(LIB) / 1048576.0))
     with open(os.path.join(ROOT, "_import_report.txt"), "w", encoding="utf-8") as f:
         f.write(report.getvalue())
-    print("imported %d charts -> res/library (%.1f MB)"
+    print("imported %d charts -> assets/library (%.1f MB)"
           % (len(entries), tree_bytes(LIB) / 1048576.0))
 
 

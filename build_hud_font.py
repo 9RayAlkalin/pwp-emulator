@@ -1,18 +1,19 @@
-"""生成 Gameplay HUD 固定字号灰度字形图集（需要 Pillow，无运行时依赖）。"""
+"""生成 Gameplay HUD 字距指标及参考灰度图集（需要 Pillow，无运行时依赖）。"""
 import json
 import pathlib
 
 from PIL import Image, ImageDraw, ImageFont, features
 
 ROOT = pathlib.Path(__file__).resolve().parent
-HUD = ROOT / 'res' / 'hud'
+HUD = ROOT / 'assets' / 'hud'
+FONT = ROOT / 'assets' / 'fonts' / 'PhiHUD.ttf'
 SIZES = (24, 36, 50, 70)
 
 
 def main():
     chars = set(chr(i) for i in range(32, 127))
     # 图集包含现有谱面库的曲名；未收录字符仍由浏览器字体回退。
-    library = ROOT / 'res' / 'library' / 'index.json'
+    library = ROOT / 'assets' / 'library' / 'index.json'
     if library.exists():
         for entry in json.loads(library.read_text(encoding='utf-8'))['charts']:
             chars.update(entry.get('name', ''))
@@ -20,7 +21,7 @@ def main():
     glyphs = {}
     tiles = []
     for size in SIZES:
-        font = ImageFont.truetype(str(HUD / 'PhiHUD.ttf'), size,
+        font = ImageFont.truetype(str(FONT), size,
                                   layout_engine=ImageFont.Layout.BASIC)
         table = {}
         for char in sorted(chars):

@@ -69,7 +69,8 @@ export interface RuntimeNote extends ChartNote {
   is_hold: boolean;
   is_above: boolean;
   clicked: boolean;
-  master: { get_state(time: number): number[] };
+  effectId?: number;
+  master: { bpm?: number; get_state(time: number): number[] };
 }
 export interface Statistics {
   perfect: number;
@@ -91,5 +92,14 @@ export interface Settings {
   brightness: number;
   noteScale: number;
   effects: boolean;
+  apFcIndicator: boolean;
   fullscreen: boolean;
+  skipLoadingAnimation: boolean;
+  playerName: string;
+  playerId: string;
+  playerAvatar: string;
+  playerRks: number;
+  playerChallengeModeRank: number;
+  playerChallengeModeTier: number;
+  playerShowName: boolean;
 }

@@ -1,7 +1,7 @@
 """从 APK 的 Addressables catalog 提取当前谱面库对应的原版预模糊曲绘。
 
 用法：py PhigrosWebPlayer/extract_backgrounds.py [Phigros_4.0.1.apk]
-需要 UnityPy；不修改谱面库及高清曲绘。输出 res/background/index.json 和 PNG。
+需要 UnityPy；不修改谱面库及高清曲绘。输出 assets/backgrounds/index.json 和 PNG。
 """
 import base64
 import json
@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parent
 
 
 def extract(apk_path):
-    output = ROOT / 'res/background'
+    output = ROOT / 'assets/background'
     output.mkdir(exist_ok=True)
-    charts = json.loads((ROOT / 'res/library/index.json').read_text(encoding='utf-8'))['charts']
+    charts = json.loads((ROOT / 'assets/library/index.json').read_text(encoding='utf-8'))['charts']
     result, sources = {}, {}
     with zipfile.ZipFile(apk_path) as apk:
         catalog = json.loads(apk.read('assets/aa/catalog.json'))
@@ -44,7 +44,7 @@ def extract(apk_path):
 
         for chart in charts:
             song = unicodedata.normalize('NFC', chart['song'])
-            if chart['path'] == '/res/s6':
+            if chart['path'] == '/assets/builtin/s6':
                 # 内置旧谱没有此版本的对应资源，运行时走高清曲绘+屏幕模糊兜底。
                 continue
             prefix = f'Assets/Tracks/{song}.0/IllustrationBlur'
@@ -65,7 +65,7 @@ def extract(apk_path):
                 filename = f'bg_{len(sources):02d}.png'
                 image = sprite.image
                 image.save(output / filename)
-                sources[key] = {'path': '/res/background/' + filename, 'key': key,
+                sources[key] = {'path': '/assets/backgrounds/' + filename, 'key': key,
                                 'bundle': bundle, 'size': list(image.size),
                                 'pixelsPerUnit': sprite.m_PixelsToUnits}
             result[chart['path']] = sources[key]['path']

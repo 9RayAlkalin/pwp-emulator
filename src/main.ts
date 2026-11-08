@@ -1,5 +1,5 @@
-import { simulator } from './engine/runtime';
-import { bindInput } from './engine/input';
+import { simulator } from './core/runtime';
+import { bindInput } from './core/input';
 import { importFiles } from './library/importer';
 import { loadSettings, saveSettings } from './settings';
 import type { ChartInfo, LibraryEntry, LocalChart, Settings } from './types';
@@ -25,6 +25,9 @@ function setBusy(value: boolean): void {
 }
 function updateSettings(patch: Partial<Settings>): void {
   if (simulator.snapshot().exporting) return;
+  if (typeof patch.playerName === 'string') patch.playerName = patch.playerName.trim().slice(0, 20) || '9RayAlkalin';
+  if (typeof patch.playerId === 'string') patch.playerId = patch.playerId.replace(/\D/g, '').slice(0, 12).padStart(8, '0');
+  if (typeof patch.playerChallengeModeRank === 'number') patch.playerChallengeModeRank = Math.round(Math.min(99, Math.max(0, patch.playerChallengeModeRank)));
   settings = { ...settings, ...patch };
   simulator.configure(settings);
   saveSettings(settings);
@@ -33,9 +36,9 @@ function updateSettings(patch: Partial<Settings>): void {
 function syncSettings(): void {
   $<HTMLInputElement>('autoplay').checked = settings.autoplay;
   $<HTMLSelectElement>('speed').value = String(settings.speed);
-  for (const input of document.querySelectorAll<HTMLInputElement>('[data-setting]')) {
+  for (const input of document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-setting]')) {
     const key = input.dataset.setting as keyof Settings;
-    if (input.type === 'checkbox') input.checked = settings[key] as boolean;
+    if (input instanceof HTMLInputElement && input.type === 'checkbox') input.checked = settings[key] as boolean;
     else input.value = String(settings[key]);
     const output = input.parentElement?.querySelector('output');
     if (output) output.textContent = `${Math.round(Number(settings[key]) * 100)}%`;
@@ -58,10 +61,8 @@ async function loadSelected(): Promise<void> {
   const entry = entries.find(item => item.path === $<HTMLSelectElement>('chart-select').value);
   if (!entry) return;
   setBusy(true);
+  $('player').hidden = false;
   simulator.pause();
-  $('loading-overlay').hidden = false;
-  $('loading-label').textContent = '正在加载谱面';
-  $('loading-text').textContent = entry.name;
   try {
     const local = localCharts.get(entry.path);
     if (local) await simulator.loadLocal(local);
@@ -113,16 +114,20 @@ $('btn-fullscreen').onclick = () => {
   if (document.fullscreenElement) void document.exitFullscreen();
   else void $('stage').requestFullscreen().catch(() => status('当前浏览器无法进入全屏'));
 };
-for (const input of document.querySelectorAll<HTMLInputElement>('[data-setting]')) {
-  input.oninput = () => {
+for (const input of document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-setting]')) {
+  const commitSetting = () => {
     const key = input.dataset.setting as keyof Settings;
-    let value: number | boolean = input.type === 'checkbox' ? input.checked : Number(input.value);
-    if (typeof value === 'number') {
+    const isCheckbox = input instanceof HTMLInputElement && input.type === 'checkbox';
+    const isText = input instanceof HTMLInputElement && (input.type === 'text' || input.type === 'search');
+    let value: number | boolean | string = isCheckbox ? input.checked : typeof settings[key] === 'string' ? input.value : Number(input.value);
+    if (typeof value === 'number' && input instanceof HTMLInputElement) {
       if (!Number.isFinite(value)) return;
       value = Math.min(Number(input.max), Math.max(Number(input.min), value));
     }
     updateSettings({ [key]: value });
   };
+  input.oninput = commitSetting;
+  input.onchange = commitSetting;
 }
 let dragDepth = 0;
 window.addEventListener('dragenter', event => {
@@ -137,7 +142,11 @@ window.addEventListener('drop', event => {
 });
 
 let lastStatsUpdate = 0;
-simulator.events.addEventListener('library', () => { $('catalog').scrollIntoView(); $<HTMLSelectElement>('chart-select').focus(); });
+simulator.events.addEventListener('library', () => {
+  $('player').hidden = true;
+  $('catalog').scrollIntoView();
+  $<HTMLSelectElement>('chart-select').focus();
+});
 simulator.events.addEventListener('error', event => status((event as CustomEvent<string>).detail));
 simulator.events.addEventListener('frame', () => {
   if (performance.now() - lastStatsUpdate < 80) return;
@@ -150,14 +159,25 @@ async function boot(): Promise<void> {
   syncSettings();
   bindInput(simulator.canvas);
   await simulator.init(settings);
+  const avatarSelect = document.querySelector<HTMLSelectElement>('[data-setting="playerAvatar"]')!;
+  avatarSelect.replaceChildren(...simulator.avatars().map(entry => new Option(entry.name, entry.id)));
+  if (!simulator.avatars().some(entry => entry.id === settings.playerAvatar)) settings.playerAvatar = 'OblivionPHIN';
+  syncSettings();
   simulator.configure(settings);
   let library: { charts?: LibraryEntry[] } = {};
   try {
-    const response = await fetch(asset('res/library/index.json'));
+    const response = await fetch(asset('assets/library/index.json'));
     if (response.ok && response.headers.get('content-type')?.includes('json')) library = await response.json();
   } catch { /* The bundled sample remains available without a generated library. */ }
   entries = library.charts || [];
-  entries.unshift({ path: '/res/s6', name: 'True Home, True World（内置演示）', difficulty: 'IN', level: 'IN Lv.?' });
+  entries.unshift({
+    path: '/assets/library/AboutTheUniverse.SOTUIMIssionary/IN',
+    asset: '/assets/library/AboutTheUniverse.SOTUIMIssionary',
+    cover: '/assets/library/AboutTheUniverse.SOTUIMIssionary/IN/image.png',
+    name: 'About The Universe', difficulty: 'IN', level: 'IN  Lv.14.0',
+    composer: 'SOTUI & MIssionary', charter: '波流二象性'
+  });
+  entries.unshift({ path: '/assets/builtin/s6', name: 'True Home, True World（内置演示）', difficulty: 'IN', level: 'IN Lv.?' });
   ready = true; setBusy(false); renderLibrary();
 }
 void boot().catch(error => {

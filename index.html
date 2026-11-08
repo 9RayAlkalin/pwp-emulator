@@ -6,7 +6,7 @@
     <title>pwp-emulator</title>
 </head>
 <body>
-    <h1>pwp-emulator | Code by 9RayAlkalin</h1>
+    <h2>pwp-emulator | Code by 9RayAlkalin</h2>
     <fieldset id="catalog">
         <legend>谱面</legend>
         <p><label>导入 <input id="file-input" type="file" multiple accept=".zip,.json,.csv,.ogg,.mp3,.wav,.m4a,.flac,.png,.jpg,.jpeg,.webp" disabled></label></p>
@@ -25,7 +25,7 @@
     </fieldset>
     <p id="toast" role="status" aria-live="polite" hidden></p>
     <p id="drop-zone" hidden>松开以导入谱面（ZIP 或 JSON + 音乐 + 曲绘）。</p>
-    <p id="loading-overlay"><span id="loading-label">正在启动</span> <progress id="loading-fill" max="100" value="0"></progress> <span id="loading-text"></span></p>
+    <p id="loading-overlay" hidden><span id="loading-label">正在启动</span> <progress id="loading-fill" max="100" value="0"></progress> <span id="loading-text"></span></p>
     <fieldset>
         <legend>游玩</legend>
         <label><input id="autoplay" type="checkbox">Autoplay</label>
@@ -36,12 +36,23 @@
     </fieldset>
     <details id="settings">
         <summary>设置</summary>
+        <p><label><input data-setting="skipLoadingAnimation" type="checkbox">跳过加载动画</label></p>
+        <fieldset id="player-profile">
+            <legend>玩家资料</legend>
+            <p><label>名称 <input data-setting="playerName" type="text" maxlength="20" value="9RayAlkalin"></label>
+                <label>Player ID <input data-setting="playerId" type="text" inputmode="numeric" maxlength="12" value="00000000"></label></p>
+            <p><label>RKS <input data-setting="playerRks" type="number" min="0" max="20" step="0.01" value="16.08"></label></p>
+            <p><label>Challenge Mode Rank <input data-setting="playerChallengeModeRank" type="number" min="0" max="99" step="1" value="48"></label></p>
+            <p><label>Challenge Mode 颜色 <select data-setting="playerChallengeModeTier"><option value="0">白</option><option value="1">绿</option><option value="2">蓝</option><option value="3" selected>红</option><option value="4">金</option><option value="5">彩</option></select></label>
+                <label><input data-setting="playerShowName" type="checkbox" checked>显示玩家名称</label></p>
+            <p><label>头像 <select data-setting="playerAvatar"><option value="OblivionPHIN">OblivionPHIN</option></select></label></p>
+        </fieldset>
         <p><label>音乐音量 <input data-setting="volume" type="range" min="0" max="1" step="0.01"><output></output></label></p>
         <p><label>打击音量 <input data-setting="hitVolume" type="range" min="0" max="1" step="0.01"><output></output></label></p>
         <p><label>背景亮度 <input data-setting="brightness" type="range" min="0" max="1" step="0.01"><output></output></label></p>
         <p><label>音符大小 <input data-setting="noteScale" type="range" min="0.5" max="1.5" step="0.05"><output></output></label></p>
         <p><label>判定偏移 (ms) <input data-setting="offset" type="number" min="-500" max="500" step="1"></label> <small>正值提前判定</small></p>
-        <p><label><input data-setting="effects" type="checkbox">后期与异象特效</label> <label><input data-setting="fullscreen" type="checkbox">开始时全屏</label></p>
+        <p><label><input data-setting="apFcIndicator" type="checkbox">FC/AP 指示器</label> <label><input data-setting="effects" type="checkbox">后期与异象特效</label> <label><input data-setting="fullscreen" type="checkbox">开始时全屏</label></p>
     </details>
     <section id="player" hidden>
         <p id="bottom-bar">
