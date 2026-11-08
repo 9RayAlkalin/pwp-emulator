@@ -9,13 +9,13 @@
     <h2>pwp-emulator | Code by 9RayAlkalin</h2>
     <fieldset id="catalog">
         <legend>谱面</legend>
-        <p><label>导入 <input id="file-input" type="file" multiple accept=".pez,.zip,.json,.pec,.rpe,.txt,.yml,.yaml,.csv,.ogg,.mp3,.wav,.m4a,.flac,.png,.jpg,.jpeg,.webp" disabled></label></p>
+        <p><label>导入 <input id="file-input" type="file" multiple accept=".pez,.zip" disabled></label></p>
         <p>
             <label>搜索 <input id="search" type="search" placeholder="曲名、曲师、谱师"></label>
             <label>难度 <select id="filter"><option value="">全部</option><option>EZ</option><option>HD</option><option>IN</option><option>AT</option><option>SP</option><option value="LOCAL">本地</option></select></label>
         </p>
         <p><label>谱面 <select id="chart-select" disabled><option>正在启动…</option></select></label> <button id="load-chart" disabled>加载</button> <span id="catalog-count"></span></p>
-        <small>支持 Phigros v1/v3、PEC、RPE、PEZ / ZIP，以及 info.yml / info.txt / info.csv / info.json；也可拖入文件。导入仅保留在当前页面会话。</small>
+        <small>支持 官谱、PEC、RPE；也可拖入文件。导入仅保留在当前页面会话。</small>
     </fieldset>
     <fieldset id="chart-info" disabled>
         <legend>谱面信息</legend>
@@ -24,7 +24,7 @@
         <p><label>难度 / 等级 <input data-info="level" type="text" placeholder="IN Lv.15"></label></p>
     </fieldset>
     <p id="toast" role="status" aria-live="polite" hidden></p>
-    <p id="drop-zone" hidden>松开以导入谱面（PEZ / ZIP 或 JSON / PEC / RPE + 音乐 + 曲绘）。</p>
+    <p id="drop-zone" hidden>松开以导入谱面（PEZ / ZIP）。</p>
     <p id="loading-overlay" hidden><span id="loading-label">正在启动</span> <progress id="loading-fill" max="100" value="0"></progress> <span id="loading-text"></span></p>
     <fieldset>
         <legend>游玩</legend>
