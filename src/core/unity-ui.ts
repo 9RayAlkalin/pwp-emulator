@@ -323,8 +323,10 @@ export class UnityUI {
     }
     // A stencil mask's white caster is fully covered by its image in Unity.
     // Filling it again under an antialiased Canvas clip exposes a white fringe.
+    // Loading's world-space illustration is drawn on the mask node itself;
+    // m_ShowMaskGraphic only controls its caster, never that dynamic image.
     const coveredMask = mask && node.children.some(child => images.has(child));
-    if (graphic && (!mask || mask.data.m_ShowMaskGraphic && !coveredMask)) {
+    if (graphic && (images.has(id) || !mask || mask.data.m_ShowMaskGraphic && !coveredMask)) {
       const data = graphic.data, tint = { ...(data.m_Color || white) };
       for (const channel of ['r', 'g', 'b', 'a']) tint[channel] = patch['m_Color.' + channel] ?? patch['color.' + channel] ?? tint[channel];
       ctx.save(); ctx.globalAlpha *= tint.a;
