@@ -110,6 +110,11 @@ export function parseRpe(value: unknown): ChartData {
       note.tintHitEffects = tint(n.tintHitEffects, 'RPE tintHitEffects');
       if (n.hitsound != null && typeof n.hitsound !== 'string') throw new Error('RPE hitsound 必须为资源路径');
       if (n.hitsound) note.hitsound = n.hitsound;
+      if (n.highlight !== undefined) {
+        const highlight = finite(n.highlight, 'RPE highlight');
+        if (![0, 1, 2].includes(highlight)) throw new Error('RPE highlight 必须为 0、1 或 2');
+        note.highlight = highlight as 0 | 1 | 2;
+      }
       note.holdInterval = 30 / tempo.bpmAt(start, factor);
       // Negative visibleTime intentionally hides notes until after their hit
       // time in existing charts; keep it signed without dropping judgement.

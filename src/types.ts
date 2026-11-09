@@ -65,6 +65,7 @@ export interface ChartNote {
   tint?: ChartColor;
   tintHitEffects?: ChartColor;
   hitsound?: string;
+  highlight?: 0 | 1 | 2;
 }
 export interface ChartLine {
   bpm: number;

@@ -19,6 +19,8 @@ import './canvas';
 import { linear, find_event, init_speed_events, merge_notes, init_note_fp, get_event_val, get_fp, rotate_point } from './timeline';
 import { createLineStateResolver, lineAppearance } from './chart-state';
 import { chartHoldSpan, chartNoteGeometry } from './chart-note-geometry';
+import { chartHoldLayout } from './chart-hold-layout';
+import { noteHighlights } from './note-highlights';
 import { ChartTextures, textureIsVisible } from './chart-textures';
 import { ChartFonts } from './chart-fonts';
 import { SpriteTints } from './sprite-tints';
@@ -2214,6 +2216,22 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                 const note_body_img = C.hold_body_imgs[note.morebets];
                 const note_tail_img = C.hold_tail_imgs[note.morebets];
                 const note_tail_height = base_note_width / note_tail_img.width * note_tail_img.height;
+                if (C.chart.data.sourceFormat === 'rpe') {
+                    const endpoints = chartHoldSpan(note.floorPosition, get_fp(note.time + note.holdTime, line.speedEvents), linefp, activeHold);
+                    const length = (endpoints[1] - endpoints[0]) * C.units.pgrh * h * note.speed;
+                    const pieces = chartHoldLayout(length, this_note_head_height, note_tail_height, draw_head);
+                    const origin = activeHold ? note_atline_pos : note_head_pos;
+                    const drawPiece = (image, distance, height) => {
+                        if (!(height > 0)) return;
+                        sctx.drawCenterRotateImage(sprite_tints.get(image, note.tint), ...rotate_point(...origin, distance, l2n_rotate),
+                            this_note_width, height, note_draw_rotate, 0, pieces.direction);
+                    };
+                    drawPiece(note_body_img, pieces.bodyCenter, pieces.bodyHeight);
+                    if (draw_head) drawPiece(note_head_img, 0, pieces.headHeight);
+                    drawPiece(note_tail_img, pieces.tailCenter, pieces.tailHeight);
+                    sctx.restore();
+                    continue;
+                }
 
                 /* hold 体收缩量按【剩余时间】线性，不按 dist —— 原版 HoldControl::NoteMove
                    （@0x1D83314，2026-10-06 反编译）holding 分支直接写 SpriteRenderer 局部缩放：
@@ -2724,7 +2742,6 @@ const rebuild_click_effects = () => {
 
 const init_chart = () => {
     const data = C.chart.data;
-    const note_sect_counter = new Map();
     const lineState = createLineStateResolver(data.judgeLineList, () => game_chart_viewport().aspect);
 
     for (const line of data.judgeLineList) {
@@ -2756,21 +2773,15 @@ const init_chart = () => {
             note.clicked = false;
             note.master = line;
 
-            if (!note.isFake) {
-                if (!note_sect_counter.has(note.sect)) note_sect_counter.set(note.sect, 0);
-                note_sect_counter.set(note.sect, note_sect_counter.get(note.sect) + 1);
-            }
         }
 
         delete line.notesAbove;
         delete line.notesBelow;
     }
 
-    for (const line of data.judgeLineList) {
-        for (const note of line.notes) {
-            note.morebets = +(!note.isFake && note_sect_counter.get(note.sect) > 1);
-        }
-    }
+    const highlightNotes = data.judgeLineList.flatMap(line => line.notes);
+    const highlights = noteHighlights(highlightNotes, data.sourceFormat);
+    highlightNotes.forEach((note, index) => { note.morebets = +highlights[index]; });
 
     init_game_score();
     C.chart.renderLines = orderedLines(data.judgeLineList);

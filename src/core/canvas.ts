@@ -6,8 +6,9 @@ CanvasRenderingContext2D.prototype.drawLine = function (x0, y0, x1, y1, width, c
 CanvasRenderingContext2D.prototype.fillRectEx = function (x, y, width, height, color) {
   this.save(); this.fillStyle = color; this.fillRect(x, y, width, height); this.restore();
 };
-CanvasRenderingContext2D.prototype.drawCenterRotateImage = function (image, x, y, width, height, degrees, skew = 0) {
+CanvasRenderingContext2D.prototype.drawCenterRotateImage = function (image, x, y, width, height, degrees, skew = 0, flipY = 1) {
   this.save(); this.translate(x, y); this.rotate(degrees * Math.PI / 180);
+  if (flipY !== 1) this.scale(1, flipY);
   if (skew) this.transform(1, 0, Math.tan(skew * Math.PI / 180), 1, 0, 0);
   this.drawImage(image, -width / 2, -height / 2, width, height); this.restore();
 };
