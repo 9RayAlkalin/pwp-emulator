@@ -27,7 +27,7 @@ export default defineConfig({
         const url = request.url?.split('?')[0];
         if (url === '/isolation-service-worker.js') {
           response.setHeader('Content-Type', 'text/javascript'); response.setHeader('Cache-Control', 'no-cache');
-          createReadStream(resolve('src/core/export/isolation-service-worker.js')).pipe(response); return;
+          createReadStream(resolve('src/render/video/isoworker.js')).pipe(response); return;
         }
         const match = url?.match(/^\/assets\/(ffmpeg(?:-mt)?)\/(ffmpeg-core\.(?:js|wasm|worker\.js))$/);
         if (!match) { next(); return; }
@@ -44,7 +44,7 @@ export default defineConfig({
     async closeBundle() {
       await cp(resolve('node_modules/@ffmpeg/core/dist/esm'), resolve('dist/assets/ffmpeg'), { recursive: true });
       await cp(resolve('node_modules/@ffmpeg/core-mt/dist/esm'), resolve('dist/assets/ffmpeg-mt'), { recursive: true });
-      await cp(resolve('src/core/export/isolation-service-worker.js'), resolve('dist/isolation-service-worker.js'));
+      await cp(resolve('src/render/video/isoworker.js'), resolve('dist/isolation-service-worker.js'));
       await cp(resolve('third-party'), resolve('dist/third-party'), { recursive: true });
       await cp(resolve('assets'), resolve('dist', 'assets'), { recursive: true });
     },

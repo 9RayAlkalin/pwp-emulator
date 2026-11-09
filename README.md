@@ -35,23 +35,25 @@ pnpm dev
 
 ```text
 src/main.ts             应用界面、谱面库与设置交互
-src/types.ts            谱面、设置、判定与统计类型
-src/library/importer.ts PEZ / ZIP / 松散文件导入、资源匹配与校验
-src/library/adapters/   PEC / RPE 格式适配、变 BPM 与事件换算
-src/library/metadata.ts info.yml / info.txt / info.json 元数据解析
-src/core/chart-state.ts 适配谱面的分层事件、父子线与文字状态
-src/core/runtime.ts     Canvas / WebGL 特效、场景流程及导出管线
-src/core/timeline.ts    时间轴、判定线事件与坐标计算
-src/core/judge.ts       手动判定、Hold 跟踪、计分与反馈事件
-src/core/hit-effects.ts 共用打击序列帧、粒子与确定性动画
-src/core/input.ts       Pointer Events、键盘与失焦暂停
-src/core/blocks.ts      方块几何、接触检测与触摸反馈
-src/core/block-audio.ts 音乐接触低通与恢复
-src/core/unity-ui.ts    原始 Unity UI 场景与曲线
+src/app/                设置类型、默认值与持久化
+src/chart/import/       PEZ / ZIP / 松散文件导入、元数据与资源匹配
+src/chart/formats/      PEC / RPE 适配、事件编译与官谱缓动编号转换
+src/chart/animation/    共用 RPE 缓动、分层事件与父子线状态
+src/chart/geometry/     视口、判定线、音符投影与 Hold 几何
+src/gameplay/           判定、统计、方块接触与打击反馈事件
+src/audio/              音乐接触滤波
+src/player/             播放流程协调、输入、时钟与场景切换
+src/render/          共用画帧管线、纹理、字体、粒子与绘制
+src/render/video/    离线时间轴、音轨、编码与容器封装
+src/ui/hud/             HUD 排版与文本绘制
+src/ui/scenes/          场景绘制 scene.ts 与入场/结束动画
+src/ui/results/         结算同步动画、成绩、音乐与收藏品
 assets/shaders/         GLSL 着色器
 assets/                 按用途整理的资源（构建时复制到 dist）
 tests/                  判定、导入及场景动画的回归测试
 ```
+
+目录表达领域，文件名优先单个单词，必要时用缩写；不在文件名中重复堆叠目录信息。实时播放与视频输出共用 `render/frame.ts`，不另建一套导出渲染器。模块边界和缓动转换见 [代码结构](docs/structure.md)。
 
 `pnpm typecheck` 检查应用与测试的类型，`pnpm test` 运行 `tests/` 下的回归测试。研究参考模型、资源恢复及浏览器复现入口集中在工作区的 `research/reproduction/`，不放在 `src/` 中。GitHub Pages 工作流使用 pnpm 安装、测试并发布 `dist/`。
 

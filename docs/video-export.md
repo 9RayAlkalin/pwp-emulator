@@ -35,6 +35,8 @@ FFmpeg 每批处理最多约 32 MiB 原始 RGBA（至少一帧），编码后删
 
 ## 模块
 
-`src/core/export/` 中：`render-job.ts` 控制固定帧循环；`audio.ts` 负责离线音轨和 PCM；`options.ts` 校验参数并生成编码命令；`ffmpeg.ts` 批次编码；`ffmpeg-runtime.ts` 管理 Wasm 生命周期；`webcodecs.ts` 管理浏览器编码；`elementary-muxer.ts` 封装浏览器生成的 H.264 / HEVC；`webm-muxer.ts` 保留 WebM 写入器；`isolation.ts` 和 Service Worker 管理多线程环境。
+实时播放与离线输出共用 `src/render/frame.ts` 的绘制顺序，由 `src/player/runtime.ts` 协调时钟、判定和场景。视频功能归入 `src/render/video/`，编码器只消费共用渲染结果，不复制 Gameplay 渲染逻辑。
+
+`video/` 中：`job.ts` 控制固定帧循环；`timeline.ts` 编排各场景时长；`audio.ts` 负责离线音轨和 PCM；`options.ts` 校验参数并生成编码命令；`control.ts` 处理取消与让出主线程。`encoders/ffmpeg.ts` 批次编码，`encoders/ffloader.ts` 管理 Wasm 生命周期，`encoders/webcodecs.ts` 管理浏览器编码，`encoders/browser.ts` 检测编码支持。`containers/mp4.ts` 封装浏览器生成的 H.264 / HEVC，`containers/webm.ts` 写入 WebM。`isolation.ts` 与 `isoworker.js` 管理多线程环境；对外部署路径仍为 `isolation-service-worker.js`。
 
 Wasm 核心随构建复制到 `dist/assets/ffmpeg/` 与 `dist/assets/ffmpeg-mt/`，按需加载，保留相对子路径。三项 FFmpeg 依赖固定版本，第三方许可证和源码指向见 `third-party/ffmpeg/`，构建时一并复制。

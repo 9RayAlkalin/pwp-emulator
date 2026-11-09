@@ -1,8 +1,10 @@
-import { simulator } from './core/runtime';
-import { bindInput } from './core/input';
-import { importFiles } from './library/importer';
-import { loadSettings, saveSettings } from './settings';
-import type { ChartInfo, LibraryEntry, LocalChart, Settings } from './types';
+import { simulator } from './player/runtime';
+import { bindInput } from './player/input';
+import { importFiles } from './chart/import/importer';
+import { loadSettings, saveSettings } from './app/settings';
+import type { ChartInfo } from './chart/types';
+import type { LibraryEntry, LocalChart } from './chart/import/types';
+import type { Settings } from './app/settings';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const asset = (path: string) => new URL(path.replace(/^\/+/, ''), new URL(import.meta.env.BASE_URL, document.baseURI)).href;
