@@ -33,6 +33,8 @@ import { applyHudAttachment, gameHudLayout, hudAttachment, hudPointCovered, inve
 import { chartViewport, hasChartViewport, resolveChartAspect } from '../chart/geometry/viewport';
 import { lineVisualKind, orderedLines, rpeLineSize } from '../chart/geometry/lines';
 import { renderGameplayFrame, type FramePasses } from '../render/frame';
+import { LineTextLayout } from '../render/text';
+import { GeometryPipeline } from '../render/geometry';
 
 // Original rendering state includes optional uniforms for chart-specific effect passes.
 const C: any = {
@@ -680,7 +682,8 @@ const clock_t = () => clock.running
     ? clock.base + (performance.now() - clock.perf) / 1000 * (settings?.speed ?? 1)
     : clock.base;
 
-const clock_seek = v => { clock.base = v; clock.perf = performance.now(); };
+let clockGeneration = 0;
+const clock_seek = v => { clockGeneration++; clock.base = v; clock.perf = performance.now(); };
 
 const clock_run = on => {
     if (on) {
@@ -2042,6 +2045,10 @@ const resize_to_window = () => {
 /* ---------------- 主渲染 ---------------- */
 
 const game_chart_viewport = () => chartViewport(cv.width, cv.height, resolveChartAspect(C.chart.data?.aspectRatio, settings?.chartAspectRatio));
+const lineTextLayout = new LineTextLayout();
+const preparedLines = new Map<any, { state: number[]; floor: number }>();
+const geometryPipeline = new GeometryPipeline();
+const geometryTime = (musicTime: number) => musicTime - C.chart.data.offset + settings.offset / 1000;
 
 /* mode: undefined=整帧（普通谱）| "bg"=只画曲绘（异象分层的背景画布）|
    "fg"=只画判定线/note/打击特效+方块 mask（透明底）。 */
@@ -2064,6 +2071,20 @@ const render_scene = (sctx, t, mode?, preview = false) => {
         sctx.fillRectEx(0, 0, w, h, `rgba(0, 0, 0, ${1 - (settings?.brightness ?? 0.65)})`);
     }
     if (mode === "bg") return;   // 背景画布到此为止；前景在另一张画布上画
+    // Prepare each line once for this frame. Hit feedback can query historical
+    // times, so this cache deliberately belongs to the render pass, not time alone.
+    const preparedFrame = geometryPipeline.frame(t, viewport.aspect);
+    for (const [index, line] of C.chart.data.judgeLineList.entries()) {
+        let prepared = preparedLines.get(line);
+        if (!prepared) { prepared = { state: [], floor: 0 }; preparedLines.set(line, prepared); }
+        if (preparedFrame) {
+            const offset = index * 5, values = preparedFrame.lines;
+            prepared.state[0] = values[offset];
+            prepared.state[1] = line.animation ? (viewport.left + values[offset + 1] * viewport.width) / w : values[offset + 1];
+            prepared.state[2] = values[offset + 2]; prepared.state[3] = values[offset + 3];
+            prepared.floor = values[offset + 4];
+        } else { prepared.state = line.get_state(t); prepared.floor = get_fp(line.sec2beat(t), line.speedEvents); }
+    }
     sctx.save();
     if (adapted) { sctx.beginPath(); sctx.rect(viewport.left, 0, viewport.width, h); sctx.clip(); }
 
@@ -2089,7 +2110,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
     const indicatorColor = judgeLineColor(settings.apFcIndicator ?? true,
         settings.autoplay || C.video_export_active ? { good: 0, bad: 0, miss: 0 } : (C.line_status ?? judge.stats));
     for (const line of C.chart.renderLines) {
-        let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
+        let [lineRotate, lineX, lineY, lineAlpha] = preparedLines.get(line)!.state;
         if (lineAlpha <= 0) continue;
         const appearance = lineAppearance(line, t);
         if (appearance.scaleX === 0 || appearance.scaleY === 0) continue;
@@ -2111,8 +2132,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             sctx.scale(appearance.scaleX, appearance.scaleY);
             sctx.font = `${objectHeight * 60 / 900}px ${C.chart.fonts?.family(appearance.font) ?? 'PhiHUD, sans-serif'}`; sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
             sctx.fillStyle = appearance.color || '#ffffff';
-            const rows = (appearance.text ?? '').split('\n');
-            const textWidth = Math.max(...rows.map(text => sctx.measureText(text).width));
+            const { rows, width: textWidth } = lineTextLayout.get(sctx, appearance.text ?? '');
             const textHeight = rows.length * objectHeight * 72 / 900;
             const [ax, ay] = line.animation?.anchor ?? [.5, .5];
             rows.forEach((text, i) => sctx.fillText(text, (.5 - ax) * textWidth,
@@ -2138,11 +2158,11 @@ const render_scene = (sctx, t, mode?, preview = false) => {
     // All judgement lines precede all notes, including notes from other lines.
     for (const note of C.chart.renderNotes) {
         const line = note.master;
-        let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
+        const prepared = preparedLines.get(line)!;
+        let [lineRotate, lineX, lineY, lineAlpha] = prepared.state;
         if (line.animation && lineAlpha < 0) continue;
         lineX *= w; lineY *= h;
-        const beatt = line.sec2beat(t);
-        const linefp = get_fp(beatt, line.speedEvents);
+        const linefp = prepared.floor;
             if (!preview && (settings.autoplay || C.video_export_active) && note.sect < t && !note.clicked) {
                 // 视频导出时不发声：导出比实时快，实时播放的打击音必然错位
                 // （导出的音轨只有音乐，见「视频导出」一节），clicked 标记照置。
@@ -2167,7 +2187,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             // **之前**就变负 ⇒ 原版不显示，我们原先只判 < -1e6 所以把它画出来了。
             const dist = note.floorPosition - linefp;
             if (line.animation) {
-                const tailDist = note.is_hold ? get_fp(note.time + note.holdTime, line.speedEvents) - linefp : dist;
+                const tailDist = note.is_hold ? note.tailFloor - linefp : dist;
                 if (line.animation.cover && note.sect >= t && dist * note.speed < -0.001 && tailDist * note.speed < -0.001) continue;
             } else if (note.sect >= t && dist < -Math.max(note.floorPosition / 6000000, 0.001)) continue;
 
@@ -2182,7 +2202,11 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             const offsetPixels = (note.yOffset ?? 0) * note.speed * C.units.pgrh * h;
             const activeHold = note.is_hold && t > note.sect && (!note.isFake || C.chart.data.sourceFormat === 'rpe');
             const controlDistance = (activeHold ? 0 : dist * C.units.pgrh * (C.units.pgrbeat / line.bpm) * 900) + (note.yOffset ?? 0) * 540;
-            const geometry = line.animation ? chartNoteGeometry(note, line.animation, t, controlDistance, note.is_above) : undefined;
+            const geometryOffset = note.renderIndex * 5;
+            const geometry = line.animation ? preparedFrame ? {
+                x: preparedFrame.notes[geometryOffset], y: preparedFrame.notes[geometryOffset + 1],
+                size: preparedFrame.notes[geometryOffset + 2], alpha: preparedFrame.notes[geometryOffset + 3], skew: preparedFrame.notes[geometryOffset + 4]
+            } : chartNoteGeometry(note, line.animation, t, controlDistance, note.is_above) : undefined;
             const controlSize = geometry?.size ?? 1;
 
             const draw_head = note.is_hold ? !activeHold : !note.clicked;
@@ -2223,7 +2247,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                 const note_tail_img = C.hold_tail_imgs[note.morebets];
                 const note_tail_height = base_note_width / note_tail_img.width * note_tail_img.height;
                 if (C.chart.data.sourceFormat === 'rpe') {
-                    const endpoints = chartHoldSpan(note.floorPosition, get_fp(note.time + note.holdTime, line.speedEvents), linefp, activeHold);
+                    const endpoints = chartHoldSpan(note.floorPosition, note.tailFloor, linefp, activeHold);
                     const length = (endpoints[1] - endpoints[0]) * C.units.pgrh * h * note.speed;
                     const pieces = chartHoldLayout(length, this_note_head_height, note_tail_height, draw_head);
                     const origin = activeHold ? note_atline_pos : note_head_pos;
@@ -2250,7 +2274,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                    （Message SP t≈22.9/24.3/25.1 三处，各叠两条 note）；负流速段则反过来只缩不完。
                    修法：clicked 起用 (t−sect)/secht 线性收缩，未点击保持全长。 */
                 const attached = activeHold;
-                const span = line.animation ? chartHoldSpan(note.floorPosition, get_fp(note.time + note.holdTime, line.speedEvents), linefp, attached) : undefined;
+                const span = line.animation ? chartHoldSpan(note.floorPosition, note.tailFloor, linefp, attached) : undefined;
                 const hold_full = line.animation
                     ? (span![1] - span![0]) * C.units.pgrh * h * note.speed
                     : note.hold_length * h;
@@ -2341,7 +2365,7 @@ const render_frame_at = (t_raw) => {
     renderGameplayFrame({ output: cv, foreground: C.scene_cv, background: C.bg_cv }, t, t_raw, split, framePasses);
 };
 
-const render = () => {
+const render = async () => {
     // rAF 必须无条件续上：以前它排在最后，一帧抛异常整条渲染循环就死了，画面永远黑屏
     try {
         // 视频导出期间由 export_video 逐帧驱动，这里让位（否则两边抢同一张画布，
@@ -2379,6 +2403,16 @@ const render = () => {
             } else if (C.scene === 'game-opening' || C.scene === 'game-over') {
                 drawGameplayTransition(cv.getContext('2d')!, sceneNow() - C.sceneTransition.start, C.scene === 'game-over', C.entrance?.musicTime ?? t_raw);
             } else if (C.chart.data) {
+                const chart = C.chart.data, scene = C.scene, width = cv.width, height = cv.height, generation = clockGeneration;
+                const running = clock.running, speed = settings.speed;
+                const chartTime = geometryTime(t_raw), aspect = game_chart_viewport().aspect;
+                await geometryPipeline.exact(chartTime, aspect, true);
+                // Input, chart loads, resize and export may run while a worker is
+                // preparing. Never submit the captured frame after such a change.
+                if (C.video_export_active || chart !== C.chart.data || scene !== C.scene ||
+                    generation !== clockGeneration || running !== clock.running || speed !== settings.speed || aspect !== game_chart_viewport().aspect ||
+                    width !== cv.width || height !== cv.height || chartTime !== geometryTime(t_raw) ||
+                    Math.abs(get_time() - t_raw) > .1) return;
                 render_frame_at(t_raw);
                 update_progress(t_raw);
                 drawSceneOverlay(cv.getContext('2d')!);
@@ -2407,7 +2441,7 @@ const render = () => {
     } catch (e) {
         console.error("渲染帧出错（已跳过该帧）：", e);
     }
-    requestAnimationFrame(render);
+    finally { requestAnimationFrame(render); }
 };
 
 /* ---------------- 视频导出 ----------------
@@ -2439,9 +2473,12 @@ const export_filename = (w, h, fps, extension: string) => {
     return `${base}_${stamp}.${extension}`;
 };
 
-const render_export_frame = (plan: ExportTimeline, time: number, view: Partial<SceneView>) => {
+const render_export_frame = async (plan: ExportTimeline, time: number, view: Partial<SceneView>) => {
     const frame = exportFrame(plan, time), ctx = cv.getContext('2d')!;
-    if (frame.scene === 'game') render_frame_at(frame.musicTime);
+    if (frame.scene === 'game') {
+        await geometryPipeline.exact(geometryTime(frame.musicTime), game_chart_viewport().aspect);
+        render_frame_at(frame.musicTime);
+    }
     else if (frame.scene === 'game-opening' || frame.scene === 'game-over') {
         if (frame.scene === 'game-over') update_game_score(frame.musicTime - C.chart.data.offset + settings.offset / 1000);
         else update_game_score(-Infinity);
@@ -2745,6 +2782,8 @@ const rebuild_click_effects = () => {
 
 const init_chart = () => {
     const data = C.chart.data;
+    lineTextLayout.clear();
+    preparedLines.clear();
     const lineState = createLineStateResolver(data.judgeLineList, () => game_chart_viewport().aspect);
 
     for (const line of data.judgeLineList) {
@@ -2773,6 +2812,7 @@ const init_chart = () => {
             note.hold_end_time = note.sect + note.secht;
             note.hold_length = note.secht * note.speed * C.units.pgrh;
             note.is_hold = note.type === C.note.hold;
+            if (note.is_hold) note.tailFloor = get_fp(note.time + note.holdTime, line.speedEvents);
             note.clicked = false;
             note.master = line;
 
@@ -2789,6 +2829,21 @@ const init_chart = () => {
     init_game_score();
     C.chart.renderLines = orderedLines(data.judgeLineList);
     C.chart.renderNotes = orderedNotes(data.judgeLineList.flatMap(line => line.notes));
+    const lineIds = new Map(data.judgeLineList.map((line, index) => [line, index]));
+    // Explicit DTOs exclude runtime functions and note.master cycles before the
+    // one-time structured clone into the worker.
+    const lines = data.judgeLineList.map(line => ({ bpm: line.bpm, notesAbove: [], notesBelow: [],
+        speedEvents: line.speedEvents, judgeLineMoveEvents: line.judgeLineMoveEvents,
+        judgeLineRotateEvents: line.judgeLineRotateEvents, judgeLineDisappearEvents: line.judgeLineDisappearEvents,
+        animation: line.animation }));
+    const notes = C.chart.renderNotes.map((note, index) => {
+        note.renderIndex = index;
+        return { line: lineIds.get(note.master) as number, above: note.is_above, note: {
+            type: note.type, time: note.time, holdTime: note.holdTime, positionX: note.positionX,
+            speed: note.speed, floorPosition: note.floorPosition, isFake: note.isFake, yOffset: note.yOffset
+        } };
+    });
+    geometryPipeline.load({ sourceFormat: data.sourceFormat, lines, notes });
     rebuild_click_effects();
 
     // 方块

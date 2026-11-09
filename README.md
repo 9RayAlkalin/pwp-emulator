@@ -57,6 +57,8 @@ tests/                  判定、导入及场景动画的回归测试
 
 `pnpm typecheck` 检查应用与测试的类型，`pnpm test` 运行 `tests/` 下的回归测试。研究参考模型、资源恢复及浏览器复现入口集中在工作区的 `research/reproduction/`，不放在 `src/` 中。GitHub Pages 工作流使用 pnpm 安装、测试并发布 `dist/`。
 
+从 Phi-TK / Phire 适配的解析积分、动画查找、帧内准备和解码并发优化见 [优化迁移说明](docs/optimizations.md)。
+
 资源目录说明见 [assets/README.md](assets/README.md)。背景继续统一放在 `assets/backgrounds/`；音乐和谱面仍位于 `assets/library/`。
 
 ## License

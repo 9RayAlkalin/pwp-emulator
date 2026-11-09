@@ -15,6 +15,7 @@ export interface ChartEvent {
   floorOrigin?: number;
   endValue?: number;
   easing?: ChartEasing;
+  speedCurves?: ChartEvent[];
   [key: string]: unknown;
 }
 export interface ChartEasing {

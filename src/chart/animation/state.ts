@@ -69,15 +69,21 @@ export function lineAppearance(line: ChartLine, time: number) {
     text, font, gifProgress: gif ? eventValue(time, gif) : undefined };
 }
 
+// Adapter control tracks are immutable and sorted by distance after import.
+const constants = new WeakMap<ChartControl[], number | null>();
 export function controlValue(points: ChartControl[] | undefined, distance: number, fallback = 1): number {
   if (!points?.length) return fallback;
+  if (!constants.has(points)) constants.set(points, points.every(p => p.value === points[0].value) ? points[0].value : null);
+  const constant = constants.get(points);
+  if (constant !== null) return constant!;
   if (distance <= points[0].x) return points[0].value;
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1], b = points[i];
-    if (distance <= b.x) {
-      const p = b.x === a.x ? 1 : (b.x - distance) / (b.x - a.x);
-      return b.value + (a.value - b.value) * rpeEase(p, b.easing);
-    }
+  let lo = 1, hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (distance <= points[mid].x) hi = mid; else lo = mid + 1;
   }
-  return points[points.length - 1].value;
+  if (lo === points.length) return points[lo - 1].value;
+  const a = points[lo - 1], b = points[lo];
+  const p = b.x === a.x ? 1 : (b.x - distance) / (b.x - a.x);
+  return b.value + (a.value - b.value) * rpeEase(p, b.easing);
 }

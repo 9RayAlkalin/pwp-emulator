@@ -3,7 +3,7 @@ import { type EncoderConfig, type ExportBackend, type FrameEncoder } from './typ
 
 export async function renderVideo(
   backend: ExportBackend, config: EncoderConfig, canvas: HTMLCanvasElement,
-  render: (time: number) => void, progress: (done: number) => void,
+  render: (time: number) => unknown, progress: (done: number) => void,
 ): Promise<{ blob: Blob; extension: FrameEncoder['extension'] }> {
   let encoder: FrameEncoder | undefined;
   try {
@@ -14,7 +14,8 @@ export async function renderVideo(
     config.status('渲染视频…');
     for (let index = 0; index < config.frames; index++) {
       checkCancelled(config.signal);
-      render(index / config.fps);
+      await render(index / config.fps);
+      checkCancelled(config.signal);
       await encoder.write(canvas, index);
       progress(index + 1);
       await yieldFrame();
