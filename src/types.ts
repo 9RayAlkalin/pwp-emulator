@@ -2,6 +2,8 @@ export type NoteType = 1 | 2 | 3 | 4;
 export type Grade = 'perfect' | 'good' | 'bad' | 'miss';
 export const hudElements = ['pause', 'combonumber', 'combo', 'score', 'bar', 'name', 'level'] as const;
 export type HudElement = typeof hudElements[number];
+export type ChartColor = [number, number, number];
+export interface ChartControl { x: number; value: number; easing: number; }
 export interface ChartEvent {
   startTime: number;
   endTime: number;
@@ -34,7 +36,9 @@ export interface LineAnimation {
   scaleX?: ChartEvent[];
   scaleY?: ChartEvent[];
   color?: ChartEvent[][];
-  text?: { startTime: number; endTime: number; start: string; end: string; easing?: ChartEasing }[];
+  text?: { startTime: number; endTime: number; start: string; end: string; easing?: ChartEasing; font?: string }[];
+  controls?: { alpha?: ChartControl[]; size?: ChartControl[]; x?: ChartControl[]; y?: ChartControl[]; skew?: ChartControl[] };
+  incline?: ChartEvent[];
   texture?: string;
   anchor?: [number, number];
   gif?: ChartEvent[];
@@ -58,6 +62,9 @@ export interface ChartNote {
   yOffset?: number;
   judgeArea?: number;
   holdInterval?: number;
+  tint?: ChartColor;
+  tintHitEffects?: ChartColor;
+  hitsound?: string;
 }
 export interface ChartLine {
   bpm: number;
@@ -106,6 +113,8 @@ export interface LocalChart {
   image?: Blob;
   postfx?: unknown;
   textures?: Record<string, Blob>;
+  fonts?: Record<string, Blob>;
+  hitsounds?: Record<string, Blob>;
 }
 export interface RuntimeNote extends ChartNote {
   sect: number;

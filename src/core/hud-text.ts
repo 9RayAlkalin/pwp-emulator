@@ -8,7 +8,7 @@ export class HudTextRenderer {
   private readonly cache = new Map<string, Raster>();
   private readonly scratch = document.createElement('canvas');
   draw(ctx: CanvasRenderingContext2D, value: unknown, size: number, align: CanvasTextAlign,
-       x: number, y: number, maxWidth: number, metrics?: HudFontMetrics): void {
+       x: number, y: number, maxWidth: number, metrics?: HudFontMetrics, tint?: string): void {
     const text = String(value);
     const chars = Array.from(text);
     const table = metrics?.sizes[size];
@@ -26,7 +26,7 @@ export class HudTextRenderer {
       let pen = x - width * fit * (align === 'right' || align === 'end' ? 1 : align === 'center' ? .5 : 0);
       const baseline = y + ((metrics?.ascent ?? .88) - .5) * size * fit;
       const draw = (value: string) => {
-        const glyph = this.raster(value, pixelSize);
+        const glyph = this.raster(value, pixelSize, tint);
         ctx.drawImage(glyph.image, pen + glyph.left / density, baseline + glyph.top / density,
           glyph.image.width / density, glyph.image.height / density);
       };
@@ -43,20 +43,20 @@ export class HudTextRenderer {
     if (known) {
       for (const char of chars) {
         if (table[char].w) {
-          const glyph = this.raster(char, pixelSize);
+          const glyph = this.raster(char, pixelSize, tint);
           ctx.drawImage(glyph.image, Math.round(pen * density + transform.e) + glyph.left, baseline + glyph.top);
         }
         pen += table[char].advance * fit;
       }
     } else {
       // Shape unfamiliar scripts as a whole line, preserving joining and kerning.
-      const line = this.raster(text, pixelSize);
+      const line = this.raster(text, pixelSize, tint);
       ctx.drawImage(line.image, Math.round(pen * density + transform.e) + line.left, baseline + line.top);
     }
     ctx.restore();
   }
-  private raster(text: string, pixelSize: number): Raster {
-    const key = `${pixelSize}:${text}`;
+  private raster(text: string, pixelSize: number, tint?: string): Raster {
+    const key = `${pixelSize}:${tint ?? '#fff'}:${text}`;
     const cached = this.cache.get(key);
     if (cached) return cached;
     const factor = 4;
@@ -74,7 +74,7 @@ export class HudTextRenderer {
     context.scale(factor, factor);
     context.font = `400 ${pixelSize}px PhiHUD, sans-serif`;
     context.textBaseline = 'alphabetic';
-    context.fillStyle = '#fff';
+    context.fillStyle = tint ?? '#fff';
     context.fillText(text, -left, -top);
     const image = document.createElement('canvas');
     image.width = width; image.height = height;

@@ -18,9 +18,13 @@ import { videoFormats, type BrowserCodec, type EncodingOptions, type FFmpegCodec
 import './canvas';
 import { linear, find_event, init_speed_events, merge_notes, init_note_fp, get_event_val, get_fp, rotate_point } from './timeline';
 import { createLineStateResolver, lineAppearance } from './chart-state';
+import { chartHoldSpan, chartNoteGeometry } from './chart-note-geometry';
 import { ChartTextures, textureIsVisible } from './chart-textures';
+import { ChartFonts } from './chart-fonts';
+import { SpriteTints } from './sprite-tints';
 import { applyHudAttachment, gameHudLayout, hudAttachment, hudPointCovered, inverseHudPoint } from './chart-hud';
 import { chartViewport, hasChartViewport, resolveChartAspect } from './chart-viewport';
+import { lineVisualKind, orderedLines, rpeLineSize } from './chart-lines';
 
 // Original rendering state includes optional uniforms for chart-specific effect passes.
 const C: any = {
@@ -305,6 +309,8 @@ const play_sound = buf => {
     source.onended = () => { source.disconnect(); gain.disconnect(); };
     source.start();
 };
+const note_sound = note => C.chart.hitsounds?.[note.hitsound] ?? C.click_sounds[note.type];
+const sprite_tints = new SpriteTints();
 
 const load_img = async (url: string): Promise<HTMLImageElement> => {
     const img = new Image();
@@ -2079,8 +2085,10 @@ const render_scene = (sctx, t, mode?, preview = false) => {
         if (lineAlpha <= 0) continue;
         const appearance = lineAppearance(line, t);
         if (appearance.scaleX === 0 || appearance.scaleY === 0) continue;
+        const kind = lineVisualKind(line);
+        if (kind === 'text' && !appearance.text) continue;
         lineX *= w; lineY *= h;
-        const textureName = appearance.text === undefined ? line.animation?.texture : undefined;
+        const textureName = kind === 'texture' ? line.animation?.texture : undefined;
         if (textureName) {
             const size = C.chart.textures?.dimensions(textureName);
             if (!size || !textureIsVisible(lineX, lineY, size.width, size.height,
@@ -2090,18 +2098,18 @@ const render_scene = (sctx, t, mode?, preview = false) => {
 
         sctx.save();
         sctx.globalAlpha = Math.max(0, Math.min(1, lineAlpha));
-        if (appearance.text !== undefined) {
+        if (kind === 'text') {
             sctx.translate(lineX, lineY); sctx.rotate(lineRotate * Math.PI / 180);
             sctx.scale(appearance.scaleX, appearance.scaleY);
-            sctx.font = `${objectHeight * 60 / 900}px sans-serif`; sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
+            sctx.font = `${objectHeight * 60 / 900}px ${C.chart.fonts?.family(appearance.font) ?? 'PhiHUD, sans-serif'}`; sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
             sctx.fillStyle = appearance.color || '#ffffff';
-            const rows = appearance.text.split('\n');
+            const rows = (appearance.text ?? '').split('\n');
             const textWidth = Math.max(...rows.map(text => sctx.measureText(text).width));
             const textHeight = rows.length * objectHeight * 72 / 900;
             const [ax, ay] = line.animation?.anchor ?? [.5, .5];
             rows.forEach((text, i) => sctx.fillText(text, (.5 - ax) * textWidth,
                 (ay - .5) * textHeight + (i - (rows.length - 1) / 2) * objectHeight * 72 / 900));
-        } else if (line.animation?.texture) {
+        } else if (kind === 'texture') {
             const texture = C.chart.textures?.get(line.animation.texture, t, appearance.gifProgress, appearance.color, 'filter' in sctx,
                 viewport.textureScale * Math.max(Math.abs(appearance.scaleX), Math.abs(appearance.scaleY)));
             if (texture) {
@@ -2111,10 +2119,12 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                 if (texture.filter) sctx.filter = texture.filter;
                 sctx.drawImage(texture.image, -ax * texture.width, (ay - 1) * texture.height, texture.width, texture.height);
             }
-        } else sctx.drawLine(
-            ...rotate_point(lineX, lineY, objectHeight * C.lineh * appearance.scaleX, lineRotate),
-            ...rotate_point(lineX, lineY, objectHeight * C.lineh * appearance.scaleX, lineRotate + 180),
-            Math.abs(objectHeight * C.linew * appearance.scaleY), appearance.color || indicatorColor);
+        } else {
+            const size = C.chart.data.sourceFormat === 'rpe' ? rpeLineSize(viewport.textureScale, appearance.scaleX, appearance.scaleY)
+                : { halfLength: objectHeight * C.lineh * appearance.scaleX, width: Math.abs(objectHeight * C.linew * appearance.scaleY) };
+            sctx.drawLine(...rotate_point(lineX, lineY, size.halfLength, lineRotate),
+                ...rotate_point(lineX, lineY, size.halfLength, lineRotate + 180), size.width, appearance.color || indicatorColor);
+        }
         sctx.restore();
     }
     // All judgement lines precede all notes, including notes from other lines.
@@ -2128,7 +2138,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             if (!preview && (settings.autoplay || C.video_export_active) && note.sect < t && !note.clicked) {
                 // 视频导出时不发声：导出比实时快，实时播放的打击音必然错位
                 // （导出的音轨只有音乐，见「视频导出」一节），clicked 标记照置。
-                if (!note.isFake && !C.video_export_active && clock.running) play_sound(C.click_sounds[note.type]);
+                if (!note.isFake && !C.video_export_active && clock.running) play_sound(note_sound(note));
                 note.clicked = true;
             }
 
@@ -2159,30 +2169,44 @@ const render_scene = (sctx, t, mode?, preview = false) => {
 
             if (!note.is_hold || line.animation) note_fp *= note.speed;
             if (!note.is_hold && note_fp < -1e6) continue;
-            if (note_fp > h * 2) continue;
+            if (note_fp > h * 2 && !(note.is_hold && line.animation) && !line.animation?.controls?.y) continue;
 
-            const draw_head = note.is_hold ? note.isFake || t <= note.sect : !note.clicked;
+            const offsetPixels = (note.yOffset ?? 0) * note.speed * C.units.pgrh * h;
+            const activeHold = note.is_hold && t > note.sect && (!note.isFake || C.chart.data.sourceFormat === 'rpe');
+            const controlDistance = (activeHold ? 0 : dist * C.units.pgrh * (C.units.pgrbeat / line.bpm) * 900) + (note.yOffset ?? 0) * 540;
+            const geometry = line.animation ? chartNoteGeometry(note, line.animation, t, controlDistance, note.is_above) : undefined;
+            const controlSize = geometry?.size ?? 1;
+
+            const draw_head = note.is_hold ? !activeHold : !note.clicked;
             const note_head_img = C.note_head_imgs[note.type][note.morebets];
-            const base_note_width = note_width * (note.morebets ? (
+            const base_note_width = note_width * controlSize * (note.morebets ? (
                 C.note_head_imgs[note.type][1].width
                 / C.note_head_imgs[note.type][0].width
             ) : 1.0);
             const this_note_width = base_note_width * (note.size ?? 1);
             const this_note_head_height = base_note_width / note_head_img.width * note_head_img.height;
             const l2n_rotate = lineRotate - (note.is_above ? 90 : -90);
-            const note_atline_pos = rotate_point(...rotate_point(lineX, lineY, note.positionX * C.units.pgrw * objectWidth, lineRotate),
+            const note_atline_pos = rotate_point(...rotate_point(lineX, lineY,
+                geometry ? geometry.x * viewport.textureScale : note.positionX * C.units.pgrw * objectWidth, lineRotate),
                 (note.yOffset ?? 0) * note.speed * C.units.pgrh * h, l2n_rotate);
-            const note_head_pos = rotate_point(...note_atline_pos, note_fp, l2n_rotate);
+            const note_head_pos = geometry ? rotate_point(...note_atline_pos, geometry.y / 900 * h - offsetPixels, l2n_rotate)
+                : rotate_point(...note_atline_pos, note_fp, l2n_rotate);
 
             const note_draw_rotate = lineRotate + (note.is_above ? 0 : 180);
 
             sctx.save();
-            sctx.globalAlpha = (note.alpha ?? 1) * (note.is_hold ? result?.visualMissed ? gameplayMetrics.holdMissAlpha : 1 : lateNoteAlpha(note, t));
+            if (line.animation?.cover && !note.is_hold) {
+                const matrix = sctx.getTransform(), reach = Math.hypot(w, h) + Math.abs(lineX) + Math.abs(lineY);
+                sctx.translate(lineX, lineY); sctx.rotate(lineRotate * Math.PI / 180);
+                sctx.beginPath(); sctx.rect(-reach, note.is_above ? -reach : 0, reach * 2, reach); sctx.clip(); sctx.setTransform(matrix);
+            }
+            sctx.globalAlpha = Math.max(0, Math.min(1, (note.alpha ?? 1) * (geometry?.alpha ?? 1))) *
+                (note.is_hold ? result?.visualMissed ? gameplayMetrics.holdMissAlpha : 1 : lateNoteAlpha(note, t));
             if (draw_head && !note.is_hold) {
                 sctx.drawCenterRotateImage(
-                    note_head_img, ...note_head_pos,
+                    sprite_tints.get(note_head_img, note.tint), ...note_head_pos,
                     this_note_width, this_note_head_height,
-                    note_draw_rotate
+                    note_draw_rotate, geometry?.skew ?? 0
                 );
             }
 
@@ -2201,15 +2225,18 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                    跳过整段 fp-span ⇒ 点击后 body 秒塌 = 「部分长条打击后就消失」
                    （Message SP t≈22.9/24.3/25.1 三处，各叠两条 note）；负流速段则反过来只缩不完。
                    修法：clicked 起用 (t−sect)/secht 线性收缩，未点击保持全长。 */
-                const attached = t > note.sect && !note.isFake;
+                const attached = activeHold;
+                const span = line.animation ? chartHoldSpan(note.floorPosition, get_fp(note.time + note.holdTime, line.speedEvents), linefp, attached) : undefined;
                 const hold_full = line.animation
-                    ? Math.max(0, (get_fp(note.time + note.holdTime, line.speedEvents) - (attached ? linefp : note.floorPosition)) * C.units.pgrh * h * note.speed)
+                    ? (span![1] - span![0]) * C.units.pgrh * h * note.speed
                     : note.hold_length * h;
                 const hold_shrink = attached && !line.animation
                     ? hold_full * Math.min(1, Math.max(0, (t - note.sect) / Math.max(note.secht, 1e-6)))
                     : 0;
+                const holdDirection = line.animation && hold_full < 0 ? -1 : 1;
+                const holdAngle = l2n_rotate + (holdDirection < 0 ? 180 : 0);
                 const note_body_height = Math.max(
-                    hold_full
+                    holdDirection * hold_full
                     - hold_shrink
                     + (attached ? this_note_head_height / 2 : 0)
                     - note_tail_height / 2
@@ -2219,26 +2246,26 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                 const note_body_pos = rotate_point(
                     ...(!attached ? note_head_pos : note_atline_pos),
                     (!attached ? this_note_head_height / 2 : 0) + note_body_height / 2,
-                    l2n_rotate);
+                    holdAngle);
 
                 sctx.drawCenterRotateImage(
-                    note_body_img, ...note_body_pos,
+                    sprite_tints.get(note_body_img, note.tint), ...note_body_pos,
                     this_note_width, note_body_height,
                     note_draw_rotate
                 );
 
                 // Native Hold adds body renderer first, then head, then tail.
-                if (draw_head) sctx.drawCenterRotateImage(note_head_img, ...note_head_pos,
+                if (draw_head) sctx.drawCenterRotateImage(sprite_tints.get(note_head_img, note.tint), ...note_head_pos,
                     this_note_width, this_note_head_height, note_draw_rotate);
 
                 const note_tail_pos = rotate_point(
                     ...note_body_pos,
                     note_body_height / 2 + note_tail_height / 2,
-                    l2n_rotate
+                    holdAngle
                 );
 
                 sctx.drawCenterRotateImage(
-                    note_tail_img, ...note_tail_pos,
+                    sprite_tints.get(note_tail_img, note.tint), ...note_tail_pos,
                     this_note_width, note_tail_height,
                     note_draw_rotate
                 );
@@ -2746,8 +2773,7 @@ const init_chart = () => {
     }
 
     init_game_score();
-    C.chart.renderLines = [...data.judgeLineList].filter(line => !line.animation?.attachUI)
-        .sort((a, b) => (a.animation?.zOrder ?? 0) - (b.animation?.zOrder ?? 0));
+    C.chart.renderLines = orderedLines(data.judgeLineList);
     C.chart.renderNotes = orderedNotes(data.judgeLineList.flatMap(line => line.notes));
     rebuild_click_effects();
 
@@ -2877,6 +2903,7 @@ const load_chart = async (dir, assetDir?, anomaly?, imageUrl?) => {
     }
 
     C.chart.textures?.dispose();
+    C.chart.fonts?.dispose(); sprite_tints.clear(); hit_effects.clear();
     C.chart = { info, data, image, background, music, postfx, dir, assetDir: adir, blocks: [] };
     C.resultImage = image;
     C.postfx = postfx;
@@ -2993,8 +3020,8 @@ const draw_game_cover = (ctx: CanvasRenderingContext2D, layout) => {
 
 // Preserve original advances while avoiding weight inflation from small-size hinting.
 const hud_text = new HudTextRenderer();
-const draw_game_text = (ctx: CanvasRenderingContext2D, value, size, align: CanvasTextAlign, x, y, max_width) => {
-    hud_text.draw(ctx, value, size, align, x, y, max_width, C.game_hud.font?.metrics);
+const draw_game_text = (ctx: CanvasRenderingContext2D, value, size, align: CanvasTextAlign, x, y, max_width, tint?: string) => {
+    hud_text.draw(ctx, value, size, align, x, y, max_width, C.game_hud.font?.metrics, tint);
 };
 
 const game_hud_attachment = (element: HudElement, t: number, layout = game_hud_layout()) =>
@@ -3014,8 +3041,10 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
     const hud = C.game_hud;
     const layout = game_hud_layout();
     const chartTime = t_raw - C.chart.data.offset + settings.offset / 1000;
+    let hudTint: string | undefined;
     const attached = (element: HudElement, x: number, y: number, draw: () => void) => {
-        ctx.save(); applyHudAttachment(ctx, game_hud_attachment(element, chartTime, layout), x, y); draw(); ctx.restore();
+        const attachment = game_hud_attachment(element, chartTime, layout);
+        ctx.save(); applyHudAttachment(ctx, attachment, x, y); hudTint = attachment?.color; draw(); hudTint = undefined; ctx.restore();
     };
     ctx.save();
     ctx.setTransform(layout.scale, 0, 0, layout.scale, 0, 0);
@@ -3030,14 +3059,14 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
     const progress = Math.max(0, Math.min(1, (t_raw - C.chart.data.offset) / duration));
     if (hud.imgs.progress && progress > 0) {
         const bar = layout.progress;
-        attached('bar', bar.left, bar.height / 2, () => ctx.drawImage(hud.imgs.progress, bar.left + bar.span * progress - bar.width,
+        attached('bar', bar.left, bar.height / 2, () => ctx.drawImage(sprite_tints.get(hud.imgs.progress, hudTint), bar.left + bar.span * progress - bar.width,
             0, bar.width, bar.height));
     }
     const button = layout.pause;
     if (hud.imgs.pause) attached('pause', button.x, button.y,
-        () => ctx.drawImage(hud.imgs.pause, button.x, button.y, button.width, button.height));
+        () => ctx.drawImage(sprite_tints.get(hud.imgs.pause, hudTint), button.x, button.y, button.width, button.height));
 
-    const text = (value, size, align: CanvasTextAlign, x, y, max_width) => draw_game_text(ctx, value, size, align, x, y, max_width);
+    const text = (value, size, align: CanvasTextAlign, x, y, max_width) => draw_game_text(ctx, value, size, align, x, y, max_width, hudTint);
     // Text is drawn about its vertical centre, while RPE attachUI pivots
     // are the top-right score corner and the bottom corners of name/level.
     attached('score', layout.score.x, layout.score.y - 50 / 2,
@@ -3360,6 +3389,7 @@ const init_player = async () => {
     C.hold_body_imgs = [C.note_imgs.hold_body, C.note_imgs.hold_mh_body];
     C.hold_tail_imgs = [C.note_imgs.hold_tail, C.note_imgs.hold_mh_tail];
 
+    const originalHitFrames: CanvasImageSource[] = [];
     for (let j = 0; j < C.respack_info.hitFx[1]; j++) {
         for (let i = 0; i < C.respack_info.hitFx[0]; i++) {
             const frame = clip_block_img(C.hit_fx,
@@ -3368,12 +3398,14 @@ const init_player = async () => {
                 ((i + 1) / C.respack_info.hitFx[0]) * C.hit_fx.width,
                 ((j + 1) / C.respack_info.hitFx[1]) * C.hit_fx.height);
             const goodFrame = clip_block_img(frame, 0, 0, frame.width, frame.height);
+            originalHitFrames.push(clip_block_img(frame, 0, 0, frame.width, frame.height));
             C.hit_fx_imgs.perfect.push(cv_put_color(frame, [255, 236, 160]));
             C.hit_fx_imgs.good.push(cv_put_color(goodFrame, [180, 225, 255]));
         }
     }
 
     hit_effects.setFrames(C.hit_fx_imgs);
+    hit_effects.setOriginalFrames(originalHitFrames);
 
     ui.loading_text.textContent = "正在加载谱面库…";
     const backgrounds = await load_json_or_null(R("/assets/backgrounds/index.json"));
@@ -3511,7 +3543,7 @@ export const simulator = {
     canvas: cv,
     async init(initialSettings: Settings) {
         settings = initialSettings;
-        judge.onHit = note => play_sound(C.click_sounds[note.type]);
+        judge.onHit = note => play_sound(note_sound(note));
         await init_player();
     },
     async load(entry: { path: string; asset?: string; cover?: string; anomaly?: string; name?: string; level?: string; composer?: string; charter?: string; illustrator?: string }) {
@@ -3535,18 +3567,23 @@ export const simulator = {
         lib_loading = true;
         const urls: string[] = [];
         let textures: ChartTextures | undefined;
+        let fonts: ChartFonts | undefined;
         const url = (blob: Blob) => { const value = URL.createObjectURL(blob); urls.push(value); return value; };
         try {
             const music = await load_audioele(url(chart.music));
             const image = await load_img(chart.image ? url(chart.image) : R('/assets/builtin/s6/image.png'));
             textures = await ChartTextures.load(chart.textures);
+            fonts = await ChartFonts.load(chart.fonts);
+            const hitsounds = Object.fromEntries(await Promise.all(Object.entries(chart.hitsounds ?? {}).map(async ([name, blob]) =>
+                [name, await actx.decodeAudioData(await blob.arrayBuffer())])));
             C.chart.music?.pause();
             C.chart.music?.remove();
             localUrls.forEach(value => URL.revokeObjectURL(value));
             localUrls = urls;
             C.chart.textures?.dispose();
+            C.chart.fonts?.dispose(); sprite_tints.clear(); hit_effects.clear();
             C.chart = { info: chart.info, data: structuredClone(chart.data), music, image, background: null,
-                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id, textures };
+                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id, textures, fonts, hitsounds };
             C.loadingImage = image; C.resultImage = image;
             C.postfx = chart.postfx || null;
             C.glitch_img = null;
@@ -3555,7 +3592,7 @@ export const simulator = {
             init_chart();
             reset_judge();
             this.ready();
-        } catch (error) { textures?.dispose(); urls.forEach(value => URL.revokeObjectURL(value)); throw error; }
+        } catch (error) { textures?.dispose(); fonts?.dispose(); urls.forEach(value => URL.revokeObjectURL(value)); throw error; }
         finally { lib_loading = false; }
     },
     ready() {

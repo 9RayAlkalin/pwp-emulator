@@ -1,5 +1,6 @@
 import type { Grade, RuntimeNote, Statistics } from '../types';
 import { createHitEffect, hitEffectDuration, holdEffectInterval, type HitEffect, type HitGrade } from './hit-effects';
+import { chartNoteGeometry } from './chart-note-geometry';
 
 interface Contact { blocked: boolean; x: number; y: number; keyboard: boolean; moved: boolean; movedAt: number; }
 interface Result {
@@ -57,7 +58,8 @@ export class Judge {
   private position(note: RuntimeNote, time: number): [number, number, number] {
     const [rotation, x, y] = note.master.get_state(time);
     const angle = rotation * Math.PI / 180;
-    const distance = note.positionX * 0.05625 * (note.master.get_viewport?.().width ?? this.width);
+    const geometry = note.master.animation ? chartNoteGeometry(note, note.master.animation, time, (note.yOffset ?? 0) * 540, note.is_above) : undefined;
+    const distance = (geometry ? geometry.x / 1350 : note.positionX * .05625) * (note.master.get_viewport?.().width ?? this.width);
     return [x * this.width + distance * Math.cos(angle), y * this.height + distance * Math.sin(angle), angle];
   }
   private near(note: RuntimeNote, contact: Contact, time: number): boolean {

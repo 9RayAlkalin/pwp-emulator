@@ -55,6 +55,38 @@ describe('PEC adapter', () => {
 });
 
 describe('RPE adapter', () => {
+  it('keeps signed visibleTime for hidden notes without removing their judgement or count', () => {
+    const chart = parseChart(rpe([{ notes: [
+      { type: 1, startTime: b(2), visibleTime: -10 },
+      { type: 4, startTime: b(2), visibleTime: -.06768244504928589 },
+      { type: 2, startTime: b(2), endTime: b(4), visibleTime: -.1 },
+    ] }]));
+    const line = chart.judgeLineList[0], notes = line.notesAbove.map(note => runtime(note, line));
+    expect(line.notesAbove.map(n => n.visibleTime)).toEqual([-10, -.06768244504928589, -.1]);
+    for (const note of notes) {
+      expect(noteIsVisible(note, undefined, note.sect - .01, true)).toBe(false);
+      expect(noteIsVisible(note, undefined, note.sect, true)).toBe(false);
+    }
+    expect(noteIsVisible(notes[2], undefined, 1.11, true)).toBe(true);
+    const judge = new Judge(); judge.reset(notes); expect(judge.stats.total).toBe(3);
+    judge.update(10); expect(judge.stats.miss).toBe(3);
+    expect(() => parseChart(rpe([{ notes: [{ type: 1, startTime: b(2), visibleTime: NaN }] }]))).toThrow('visibleTime');
+    expect(() => parseChart(rpe([{ notes: [{ type: 1, startTime: b(2), size: -1 }] }]))).toThrow('宽度');
+  });
+  it('normalizes descending easing crops without swapping endpoints or falling back to the full curve', () => {
+    const event = { ...e(-10, 0, 0, 2, 6), easingLeft: 1, easingRight: .5 };
+    const chart = parseChart(rpe([{ eventLayers: [{ moveXEvents: [event] }] }]));
+    const state = createLineStateResolver(chart.judgeLineList), line = chart.judgeLineList[0];
+    expect(easingProgress(0, { type: 6, left: 1, right: .5 })).toBeCloseTo(0);
+    expect(easingProgress(.5, { type: 6, left: 1, right: .5 })).toBeCloseTo(1 - Math.SQRT1_2);
+    expect(easingProgress(1, { type: 6, left: 1, right: .5 })).toBe(1);
+    expect(state(line, .5)[1]).toBeCloseTo(.5 - Math.SQRT1_2 * 10 / 1350);
+    expect(state(line, 1)[1]).toBe(.5);
+    expect(state(line, .5)[1]).toBeCloseTo(.5 - Math.SQRT1_2 * 10 / 1350);
+    for (const crop of [{ easingLeft: 1.1 }, { easingRight: -.1 }]) {
+      expect(() => parseChart(rpe([{ eventLayers: [{ moveXEvents: [{ ...event, ...crop }] }] }]))).toThrow('0–1');
+    }
+  });
   it('keeps authored initial transforms during offset lead-in so a parked future Hold stays offscreen', () => {
     const raw = rpe([{ eventLayers: [{ moveXEvents: [e(1318.359375)], moveYEvents: [e(1285.7142857142858)],
       rotateEvents: [e(20)], alphaEvents: [e(0)], speedEvents: [e(4.5)] }],

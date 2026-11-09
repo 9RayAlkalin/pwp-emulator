@@ -43,6 +43,15 @@ async function archive(entries: Record<string, string>, name = 'chart.pez'): Pro
   return new File([new Uint8Array(await zip.generateAsync({ type: 'uint8array' }))], name);
 }
 
+it('names damaged archives and requests a complete copy without pretending partial resources are playable', async () => {
+  const file = await archive({ 'chart.pec': pec, 'music.ogg': 'song' }, 'broken.pez');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  await expect(importFiles([new File([bytes.slice(0, 32)], file.name)], () => {}))
+    .rejects.toThrow('broken.pez：无法解压');
+  await expect(importFiles([new File(['not an archive'], 'invalid.zip')], () => {}))
+    .rejects.toThrow('请重新下载或重新导出');
+});
+
 it('imports info.txt key-value metadata, colons in titles, quoted paths and Windows separators', async () => {
   const file = await archive({
     'pack/info.txt': '\uFEFF#\r\nName: Song: One\r\nSong: "audio\\one.ogg"\r\nPicture: cover.png\r\nChart: charts\\score.pec\r\nLevel: IN 14\r\nComposer: Artist\r\nCharter: Mapper\r\nIllustrator: Painter',
@@ -147,6 +156,19 @@ it('preserves referenced line images and GIFs without mistaking them for chart a
 it('reports a missing custom texture instead of drawing a replacement judgement line', async () => {
   const raw = { META: {}, BPMList: [{ startTime: [0, 0, 1], bpm: 120 }], judgeLineList: [{ Texture: 'missing.png' }] };
   await expect(importFiles([await archive({ 'chart.json': JSON.stringify(raw), 'music.ogg': 'song' })], () => {})).rejects.toThrow('missing.png');
+});
+
+it('imports chart-local font and hitsound files without confusing them with the main music', async () => {
+  const raw = { META: { song: 'music.ogg' }, BPMList: [{ startTime: [0, 0, 1], bpm: 120 }], judgeLineList: [{
+    extended: { textEvents: [{ startTime: [0, 0, 1], endTime: [1, 0, 1], start: 'Hi', end: 'Hi', font: 'fonts/MiSans.ttf' }] },
+    notes: [{ type: 1, startTime: [1, 0, 1], hitsound: 'sounds/bruh.wav' }],
+  }] };
+  const result = await importFiles([await archive({ 'chart.json': JSON.stringify(raw), 'music.ogg': 'music',
+    'fonts/MiSans.ttf': 'font', 'sounds/bruh.wav': 'effect' })], () => {});
+  expect(await result[0].music.text()).toBe('music');
+  expect(await result[0].fonts!['fonts/MiSans.ttf'].text()).toBe('font');
+  expect(await result[0].hitsounds!['sounds/bruh.wav'].text()).toBe('effect');
+  expect(result[0].data.warnings).toEqual([]);
 });
 
 it('preserves the chart aspect ratio from info.yml and rejects invalid ratios', async () => {

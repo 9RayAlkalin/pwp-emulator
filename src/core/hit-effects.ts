@@ -1,6 +1,8 @@
 import type { RuntimeNote } from '../types';
 import { get_fp } from './timeline';
 import { noteViewportScale } from './gameplay-visuals';
+import { chartNoteGeometry } from './chart-note-geometry';
+import { SpriteTints } from './sprite-tints';
 import { createHitParticles, sampleHitParticle, type Particle } from './native-particles';
 export { createHitParticles, sampleHitParticle } from './native-particles';
 
@@ -46,9 +48,11 @@ export function hitEffectPosition(effect: HitEffect, width: number, height: numb
   const [rotation, x, y] = effect.note.master.get_state(effect.time);
   const angle = rotation * Math.PI / 180;
   const viewport = effect.note.master.get_viewport?.();
-  const offset = effect.note.positionX * 0.05625 * (viewport?.width ?? width);
+  const geometry = effect.note.master.animation ? chartNoteGeometry(effect.note, effect.note.master.animation, effect.time,
+    (effect.note.yOffset ?? 0) * 540, effect.note.is_above) : undefined;
+  const offset = (geometry ? geometry.x / 1350 : effect.note.positionX * .05625) * (viewport?.width ?? width);
   let px = x * width + offset * Math.cos(angle), py = y * height + offset * Math.sin(angle);
-  const yOffset = (effect.note.yOffset ?? 0) * effect.note.speed * .6 * height;
+  const yOffset = geometry ? geometry.y / 900 * height : (effect.note.yOffset ?? 0) * effect.note.speed * .6 * height;
   const normalAngle = angle + (effect.note.is_above ? -Math.PI / 2 : Math.PI / 2);
   px += Math.cos(normalAngle) * yOffset; py += Math.sin(normalAngle) * yOffset;
   const line = effect.note.master as RuntimeNote['master'] & { speedEvents?: Parameters<typeof get_fp>[1]; sec2beat?: (time: number) => number };
@@ -63,16 +67,20 @@ export function hitEffectPosition(effect: HitEffect, width: number, height: numb
   return [px, py];
 }
 export class HitEffectRenderer {
+  private readonly tints = new SpriteTints();
   private readonly cache = new Map<string, Particle[]>();
   private frames: Record<HitGrade, CanvasImageSource[]> = { perfect: [], good: [] };
+  private originalFrames: CanvasImageSource[] = [];
   setFrames(frames: Record<HitGrade, CanvasImageSource[]>): void { this.frames = frames; }
+  setOriginalFrames(frames: CanvasImageSource[]): void { this.originalFrames = frames; }
+  clear(): void { this.tints.clear(); this.cache.clear(); }
   draw(ctx: CanvasRenderingContext2D, effects: readonly HitEffect[], time: number,
        width: number, height: number, noteScale = 1, speed = 1): void {
     for (const effect of effects) {
       const elapsed = effect.elapsed ?? (time - effect.time) / speed;
       if (elapsed < 0 || elapsed >= hitEffectDuration) continue;
       const [x, y] = hitEffectPosition(effect, width, height);
-      const frames = this.frames[effect.grade];
+      const frames = effect.note.tintHitEffects && this.originalFrames.length ? this.originalFrames : this.frames[effect.grade];
       const frame = frames[Math.min(frames.length - 1, Math.floor(elapsed / 0.5 * frames.length))];
       ctx.save();
       ctx.globalCompositeOperation = 'source-over';
@@ -80,7 +88,7 @@ export class HitEffectRenderer {
       if (elapsed < 0.5 && frame) {
         const size = height * (2.56 * 1.35 / 10) * noteScale * (effect.note.master.get_viewport?.().gameplayScale ?? noteViewportScale(width, height));
         ctx.globalAlpha = effect.grade === 'perfect' ? 225 / 255 : 235 / 255;
-        ctx.drawImage(frame, x - size / 2, y - size / 2, size, size);
+        ctx.drawImage(this.tints.get(frame, effect.note.tintHitEffects), x - size / 2, y - size / 2, size, size);
       }
       const emitterScale = 1.35 * noteScale * (effect.note.master.get_viewport?.().gameplayScale ?? noteViewportScale(width, height));
       const key = `${effect.seed}:${effect.grade}:${emitterScale}`;
@@ -93,7 +101,7 @@ export class HitEffectRenderer {
       // ScoreControl/HoldControl overwrite prefab scale with 1.35 * note scale.
       // Velocity is scaled before world-space quadratic drag is evaluated.
       const scale = height / 10;
-      ctx.fillStyle = colors[effect.grade];
+      ctx.fillStyle = effect.note.tintHitEffects ? `rgb(${effect.note.tintHitEffects.join(',')})` : colors[effect.grade];
       for (const particle of particles) {
         const state = sampleHitParticle(particle, elapsed);
         if (!state) continue;

@@ -1,6 +1,6 @@
-import type { ChartEvent, ChartLine } from '../types';
+import type { ChartControl, ChartEvent, ChartLine } from '../types';
 import { eventValue, get_event_val } from './timeline';
-import { easingProgress } from './chart-easing';
+import { chartEase, easingProgress } from './chart-easing';
 import { defaultChartAspect } from './chart-viewport';
 
 export type LineState = [rotation: number, x: number, y: number, alpha: number];
@@ -43,22 +43,41 @@ export function createLineStateResolver(lines: ChartLine[], aspectRatio: number 
 export function lineAppearance(line: ChartLine, time: number) {
   const a = line.animation;
   let text: string | undefined;
+  let font: string | undefined;
   if (a?.text?.length) {
     text = '';
-    for (const e of a.text) {
-      if (time < e.startTime) break;
+    let lo = 0, hi = a.text.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (a.text[mid].startTime <= time) lo = mid + 1; else hi = mid;
+    }
+    const e = a.text[lo - 1];
+    if (e) {
+      font = e.font;
       const progress = easingProgress(e.endTime === e.startTime ? 1 : (time - e.startTime) / (e.endTime - e.startTime), e.easing ?? { type: 1 });
-      const number = /^(-?\d+(?:\.\d+)?)%P%$/;
+      const number = /^(?:%P%-?\d+(?:\.\d+)?|-?\d+(?:\.\d+)?%P%)$/;
       if (number.test(e.start) && number.test(e.end)) {
         text = String(Math.round(Number(e.start.replace('%P%', '')) + progress * (Number(e.end.replace('%P%', '')) - Number(e.start.replace('%P%', '')))));
       } else if (e.end.startsWith(e.start)) text = e.end.slice(0, Math.round(e.start.length + progress * (e.end.length - e.start.length)));
       else if (e.start.startsWith(e.end)) text = e.start.slice(0, Math.round(e.start.length + progress * (e.end.length - e.start.length)));
       else text = time >= e.endTime ? e.end : e.start;
-      if (time < e.endTime) break;
     }
   }
   const gif = a?.gif?.find(e => time >= e.startTime && time < e.endTime);
   return { scaleX: value(time, a?.scaleX, 1), scaleY: value(time, a?.scaleY, 1),
     color: a?.color?.length ? `rgb(${a.color.map(events => Math.round(Math.max(0, Math.min(255, value(time, events, 255))))).join(',')})` : undefined,
-    text, gifProgress: gif ? eventValue(time, gif) : undefined };
+    text, font, gifProgress: gif ? eventValue(time, gif) : undefined };
+}
+
+export function controlValue(points: ChartControl[] | undefined, distance: number, fallback = 1): number {
+  if (!points?.length) return fallback;
+  if (distance <= points[0].x) return points[0].value;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1], b = points[i];
+    if (distance <= b.x) {
+      const p = b.x === a.x ? 1 : (b.x - distance) / (b.x - a.x);
+      return b.value + (a.value - b.value) * chartEase(p, b.easing);
+    }
+  }
+  return points[points.length - 1].value;
 }

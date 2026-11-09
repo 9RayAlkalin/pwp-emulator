@@ -74,12 +74,16 @@ export async function importFiles(files: File[], progress: (text: string) => voi
   for (const file of files) {
     if (/\.(pez|zip)$/i.test(file.name)) {
       progress(`解压 ${file.name}`);
-      const zip = await JSZip.loadAsync(file);
-      const archive = ++group;
-      for (const entry of Object.values(zip.files)) {
-        if (entry.dir || /(^|\/)__MACOSX\//.test(entry.name)) continue;
-        const blob = await entry.async('blob');
-        assets.push({ name: normalizePath(entry.name), blob, group: archive });
+      try {
+        const zip = await JSZip.loadAsync(file);
+        const archive = ++group;
+        for (const entry of Object.values(zip.files)) {
+          if (entry.dir || /(^|\/)__MACOSX\//.test(entry.name)) continue;
+          const blob = await entry.async('blob');
+          assets.push({ name: normalizePath(entry.name), blob, group: archive });
+        }
+      } catch {
+        throw new Error(`${file.name}：无法解压，压缩包可能损坏、不完整或格式不支持；请重新下载或重新导出`);
       }
     } else assets.push({ name: normalizePath(file.webkitRelativePath || file.name), blob: file, group: 0 });
   }
@@ -171,9 +175,19 @@ export async function importFiles(files: File[], progress: (text: string) => voi
       return undefined;
     }
     const textures: Record<string, Blob> = {};
+    const fonts: Record<string, Blob> = {}, hitsounds: Record<string, Blob> = {};
     for (const line of data.judgeLineList) {
       const texture = line.animation?.texture;
       if (texture && !textures[texture]) textures[texture] = choose(images, texture, [], false)!.blob;
+      for (const event of line.animation?.text ?? []) {
+        if (event.font && !fonts[event.font]) {
+          if (/\.(ttf|otf|woff2?)$/i.test(event.font)) fonts[event.font] = choose(assets, event.font, [], false)!.blob;
+          else data.warnings?.push(`自定义字体 ${event.font} 无对应字体文件，使用默认字体`);
+        }
+      }
+      for (const note of [...line.notesAbove, ...line.notesBelow]) {
+        if (note.hitsound && !hitsounds[note.hitsound]) hitsounds[note.hitsound] = choose(audio, note.hitsound, [], false)!.blob;
+      }
     }
     const music = choose(audio, field('music') || meta?.song);
     if (!music) throw new Error(`${filename(name)} 无法匹配音乐；请一并选择音乐，或在 info.yml / info.txt / info.csv / info.json 中填写谱面与音乐路径`);
@@ -186,7 +200,7 @@ export async function importFiles(files: File[], progress: (text: string) => voi
         composer: field('composer') || meta?.composer, charter: field('charter') || meta?.charter,
         illustrator: field('illustrator') || meta?.illustration },
       postfx: parsed.get(assets.find(value => value.group === asset.group && key(value.name) === key(`${dir}postfx.json`))!),
-      textures,
+      textures, fonts, hitsounds,
     });
   }
   if (!charts.length) throw new Error('未找到谱面；支持 Phigros v1/v3、PEC、RPE，以及 PEZ/ZIP 谱面包');

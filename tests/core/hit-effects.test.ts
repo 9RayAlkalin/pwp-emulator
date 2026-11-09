@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeHitEffects, createHitEffect, createHitParticles, hitEffectPosition, sampleHitParticle } from '../../src/core/hit-effects';
+import { activeHitEffects, createHitEffect, createHitParticles, hitEffectPosition, HitEffectRenderer, sampleHitParticle } from '../../src/core/hit-effects';
 import { Judge } from '../../src/core/judge';
 import type { RuntimeNote } from '../../src/types';
 
@@ -12,6 +12,15 @@ const note = (type: 1 | 3 = 1): RuntimeNote => ({
 const tap = (judge: Judge, time = 1) => judge.input('finger', 500, 250, 'tap', time, 1000, 500, true);
 
 describe('shared hit effects', () => {
+  it('uses an explicit hit-effect colour for both Perfect and Good particles', () => {
+    for (const grade of ['perfect', 'good'] as const) {
+      const n = note(); n.tintHitEffects = [106, 90, 205];
+      const colors: string[] = [];
+      const ctx = { fillStyle: '', globalAlpha: 1, save() {}, restore() {}, fillRect() { colors.push(this.fillStyle); } };
+      new HitEffectRenderer().draw(ctx as unknown as CanvasRenderingContext2D, [createHitEffect(n, 1, grade)], 1.1, 1000, 500);
+      expect(colors.length).toBeGreaterThan(0); expect(colors.every(c => c === 'rgb(106,90,205)')).toBe(true);
+    }
+  });
   it('only returns live bursts when seeking forwards, backwards and to effect boundaries', () => {
     const n = note();
     const events = [0, 1, 2].map(time => createHitEffect(n, time, 'perfect'));

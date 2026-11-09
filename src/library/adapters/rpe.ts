@@ -1,13 +1,19 @@
-import type { ChartData, ChartEasing, ChartEvent, ChartNote, NoteType } from '../../types';
+import type { ChartColor, ChartData, ChartEasing, ChartEvent, ChartNote, NoteType } from '../../types';
 import { hudElements } from '../../types';
 import { array, beat, combineSpeeds, compileTrack, emptyLine, finite, record, TempoMap, type BeatEvent } from './common';
 
 const noteTypes: NoteType[] = [1, 1, 3, 4, 2];
+function tint(raw: unknown, name: string): ChartColor | undefined {
+  if (raw == null) return undefined;
+  const color = array(raw, name).map(v => finite(v, name));
+  if (color.length !== 3 || color.some(v => v < 0 || v > 255)) throw new Error(`${name} 必须包含三个 0–255 数值`);
+  return color.every(v => v === 255) ? undefined : color as ChartColor;
+}
 function easing(e: Record<string, any>): ChartEasing {
   const type = finite(e.easingType, 'RPE easingType', 1);
   if (!Number.isInteger(type) || type < 1 || type > 29) throw new Error('RPE easingType 必须为 1–29');
   const left = finite(e.easingLeft, 'RPE easingLeft', 0), right = finite(e.easingRight, 'RPE easingRight', 1);
-  if (left < 0 || right > 1 || left > right) throw new Error('RPE 缓动裁剪范围无效');
+  if (left < 0 || left > 1 || right < 0 || right > 1) throw new Error('RPE 缓动裁剪范围必须为 0–1');
   let bezier: number[] | undefined;
   if (e.bezier === 1) {
     bezier = array(e.bezierPoints, 'RPE bezierPoints').map(v => finite(v, 'RPE 贝塞尔控制点'));
@@ -56,6 +62,10 @@ export function parseRpe(value: unknown): ChartData {
       zOrder: finite(s.zOrder, 'RPE zOrder', 0) };
     if (ext.scaleXEvents?.length) l.animation.scaleX = compile(ext.scaleXEvents, 1);
     if (ext.scaleYEvents?.length) l.animation.scaleY = compile(ext.scaleYEvents, 1);
+    if (ext.inclineEvents?.length) l.animation.incline = compile(array(ext.inclineEvents, 'RPE inclineEvents').map(e =>
+      // Older exporters put a line index into the easing field of constant
+      // inclination padding. Its curve cannot affect an unchanged value.
+      e.start === e.end ? { ...e, easingType: 1, bezier: 0, easingLeft: 0, easingRight: 1 } : e));
     if (ext.colorEvents?.length) l.animation.color = [0, 1, 2].map(channel => compile(ext.colorEvents, 255, 1, channel));
     const anchor = s.anchor === undefined ? [.5, .5] : array(s.anchor, 'RPE anchor');
     if (anchor.length !== 2) throw new Error('RPE anchor 必须包含两个数值');
@@ -76,8 +86,9 @@ export function parseRpe(value: unknown): ChartData {
         if (typeof e.start !== 'string' || typeof e.end !== 'string') throw new Error('RPE 文字事件必须包含字符串');
         const original = { startTime: beat(e.startTime), endTime: beat(e.endTime), start: 0, end: 1, easing: easing(e) };
         const compiled = compileTrack([original], tempo, 0, factor).filter(v => v.easing);
-        if (original.startTime === original.endTime) return [{ startTime: tempo.seconds(original.startTime, factor), endTime: tempo.seconds(original.endTime, factor), start: e.start, end: e.end, easing: undefined }];
-        return compiled.map(v => ({ startTime: v.startTime, endTime: v.endTime, start: e.start, end: e.end, easing: v.easing }));
+        const font = typeof e.font === 'string' && e.font !== 'cmdysj' ? e.font : undefined;
+        if (original.startTime === original.endTime) return [{ startTime: tempo.seconds(original.startTime, factor), endTime: tempo.seconds(original.endTime, factor), start: e.start, end: e.end, easing: undefined, font }];
+        return compiled.map(v => ({ startTime: v.startTime, endTime: v.endTime, start: e.start, end: e.end, easing: v.easing, font }));
       }).sort((a, b) => a.startTime - b.startTime);
     }
     l.speedEvents = combineSpeeds(layers.length ? layers.map(layer => compile(layer.speedEvents, 0, 1 / 4.5, undefined, false)) : [compile(undefined)]);
@@ -95,18 +106,24 @@ export function parseRpe(value: unknown): ChartData {
         size: finite(n.size, 'RPE size', 1), alpha: Math.max(0, Math.min(1, finite(n.alpha, 'RPE alpha', 255) / 255)),
         visibleTime: finite(n.visibleTime, 'RPE visibleTime', 999999), yOffset: finite(n.yOffset, 'RPE yOffset', 0) / 540,
         judgeArea: finite(n.judgeArea, 'RPE judgeArea', 1) };
+      note.tint = tint(n.tint ?? n.color, 'RPE note tint');
+      note.tintHitEffects = tint(n.tintHitEffects, 'RPE tintHitEffects');
+      if (n.hitsound != null && typeof n.hitsound !== 'string') throw new Error('RPE hitsound 必须为资源路径');
+      if (n.hitsound) note.hitsound = n.hitsound;
       note.holdInterval = 30 / tempo.bpmAt(start, factor);
-      if (note.size! < 0 || note.visibleTime! < 0 || note.judgeArea! < 0) throw new Error('RPE 音符宽度、可见时间与判定区域不能为负数');
+      // Negative visibleTime intentionally hides notes until after their hit
+      // time in existing charts; keep it signed without dropping judgement.
+      if (note.size! < 0 || note.judgeArea! < 0) throw new Error('RPE 音符宽度与判定区域不能为负数');
       (n.above === undefined || n.above === 1 ? l.notesAbove : l.notesBelow).push(note);
-      if (n.hitsound) warnings.add('自定义打击音尚未播放，使用默认音效');
-      if ([n.tint, n.color, n.tintHitEffects].some(c => c && (!Array.isArray(c) || c.some(v => v !== 255)))) warnings.add('音符及打击特效自定义染色尚未渲染');
     }
-    for (const [field, key, neutral] of [['alphaControl', 'alpha', 1], ['sizeControl', 'size', 1], ['posControl', 'pos', 1], ['yControl', 'y', 1], ['skewControl', 'skew', 0]] as const) {
-      if (array(s[field], `RPE ${field}`).some(c => c[key] !== neutral)) warnings.add('RPE 距离控制器尚未渲染');
+    for (const [field, key, target] of [['alphaControl', 'alpha', 'alpha'], ['sizeControl', 'size', 'size'], ['posControl', 'pos', 'x'],
+      ['yControl', 'y', 'y'], ['skewControl', 'skew', 'skew']] as const) {
+      const points = array(s[field], `RPE ${field}`).map(c => ({ x: finite(c.x, `RPE ${field}.x`),
+        value: finite(c[key], `RPE ${field}.${key}`), easing: finite(c.easing, `RPE ${field}.easing`, 1) })).sort((a, b) => a.x - b.x);
+      if (points.some(c => !Number.isInteger(c.easing) || c.easing < 1 || c.easing > 29)) throw new Error('RPE Control easing 必须为 1–29');
+      if (points.length) (l.animation.controls ??= {})[target] = points;
     }
-    if (array(ext.inclineEvents, 'RPE inclineEvents').some(e => e.start !== 0 || e.end !== 0)) warnings.add('RPE 判定线倾斜尚未渲染');
     if (ext.paintEvents?.length) warnings.add('RPE 画笔事件尚未渲染');
-    if (array(ext.textEvents, 'RPE textEvents').some(e => e.font && e.font !== 'cmdysj')) warnings.add('RPE 自定义字体使用浏览器默认字体替代');
     return l;
   });
   const visited = new Set<number>(), visiting = new Set<number>();

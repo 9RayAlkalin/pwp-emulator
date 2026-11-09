@@ -21,7 +21,7 @@ export function gameHudLayout(w: number, h: number, bounds?: Pick<ChartViewport,
     progress: { left, span: 2 * half_width, width: 1919, height: 11 } };
 }
 
-export interface HudAttachment { dx: number; dy: number; rotation: number; scaleX: number; scaleY: number; alpha: number; }
+export interface HudAttachment { dx: number; dy: number; rotation: number; scaleX: number; scaleY: number; alpha: number; color?: string; }
 export function hudPointCovered(x: number, y: number, layout: { height: number; cover: { left: number; right: number; width: number } }): boolean {
   const { left, right, width } = layout.cover;
   return left > 0 && y >= 0 && y < layout.height &&
@@ -34,7 +34,7 @@ export function hudAttachment(lines: ChartLine[], element: HudElement, time: num
   if (!line) return undefined;
   const [rotation, x, y, alpha] = state(line, time), appearance = lineAppearance(line, time);
   return { dx: (x - .5) * width, dy: (y - .5) * height, rotation,
-    scaleX: appearance.scaleX, scaleY: appearance.scaleY, alpha: Math.max(0, Math.min(1, alpha)) };
+    scaleX: appearance.scaleX, scaleY: appearance.scaleY, alpha: Math.max(0, Math.min(1, alpha)), color: appearance.color };
 }
 export function applyHudAttachment(ctx: CanvasRenderingContext2D, a: HudAttachment | undefined, x: number, y: number): void {
   if (!a) return;

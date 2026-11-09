@@ -61,7 +61,7 @@ export function easingProgress(t: number, easing: ChartEasing): number {
   const p = (easing.from ?? 0) + clamp(t) * ((easing.to ?? 1) - (easing.from ?? 0));
   if (easing.bezier) return bezier(p, easing.bezier);
   const left = clamp(easing.left ?? 0), right = clamp(easing.right ?? 1);
-  if (left >= right) return chartEase(p, easing.type);
+  if (left === right) return chartEase(p, easing.type);
   const a = chartEase(left, easing.type), b = chartEase(right, easing.type);
   return Math.abs(b - a) < 1e-12 ? p : (chartEase(left + (right - left) * p, easing.type) - a) / (b - a);
 }
