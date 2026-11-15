@@ -1,0 +1,33 @@
+diff --git a/dist/node/chunks/dep-CkSfqg8D.js b/dist/node/chunks/dep-CkSfqg8D.js
+index c2a41aab690aa34195ab6237074f4965e7e593c5..e5cbc05be6c0d86e0d083ee0be6cae00f6708257 100644
+--- a/dist/node/chunks/dep-CkSfqg8D.js
++++ b/dist/node/chunks/dep-CkSfqg8D.js
+@@ -38920,8 +38920,8 @@ async function _createServer(inlineConfig = {}, options) {
+       server = _server;
+     },
+     _importGlobMap: /* @__PURE__ */ new Map(),
+-    _restartPromise: null,
+-    _forceOptimizeOnRestart: false,
++    _restartPromise: options.previousServer?._restartPromise ?? null,
++    _forceOptimizeOnRestart: options.previousServer?._forceOptimizeOnRestart ?? false,
+     _shortcutsOptions: void 0
+   };
+   const reflexServer = new Proxy(server, {
+@@ -39226,6 +39226,7 @@ async function restartServer(server) {
+     try {
+       newServer = await _createServer(inlineConfig, {
+         listen: false,
++        previousServer: server,
+         previousEnvironments: server.environments
+       });
+     } catch (err) {
+@@ -39239,6 +39240,9 @@ async function restartServer(server) {
+     const middlewares = server.middlewares;
+     newServer._configServerPort = server._configServerPort;
+     newServer._currentServerPort = server._currentServerPort;
++    // Keep the restart lock until the replacement server finishes listening.
++    newServer._restartPromise = server._restartPromise;
++    newServer._forceOptimizeOnRestart = server._forceOptimizeOnRestart;
+     Object.assign(server, newServer);
+     middlewares.stack = newServer.middlewares.stack;
+     server.middlewares = middlewares;

@@ -1,0 +1,2 @@
+patchedDependencies:
+  vite@6.4.5: patches/vite@6.4.5.patch

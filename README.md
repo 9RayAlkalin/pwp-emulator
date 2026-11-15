@@ -63,6 +63,6 @@ tests/                  判定、导入及场景动画的回归测试
 资源目录说明见 [assets/README.md](assets/README.md)。背景继续统一放在 `assets/backgrounds/`；音乐和谱面仍位于 `assets/library/`。
 
 ## License
-本仓库中由我编写的代码采用 Unlicense 发布，进入公共领域。
+本仓库代码采用 GNU General Public License v3.0（GPL-3.0-only）发布，完整条款见 [LICENSE](LICENSE)。
 第三方资源（如 Phigros 相关素材、音乐、谱面等）版权归各自所有者，不适用本许可。
 FFmpeg 依赖保留 MIT / GPL-2.0-or-later 等上游许可，声明见 [third-party/ffmpeg](third-party/ffmpeg/README.md)。

@@ -35,6 +35,8 @@ export default defineConfig({
     },
   },
   server: {
+    port: 5173,
+    strictPort: true,
     allowedHosts: ['pwp.arkra.cc.cd'],
     watch: { ignored: ['**/verification-edge-profile/**'] },
   },

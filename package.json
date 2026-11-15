@@ -2,6 +2,7 @@
   "name": "pwp-simulator",
   "version": "0.2.0",
   "private": true,
+  "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
     "node": ">=22"
