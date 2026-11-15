@@ -15,6 +15,7 @@
 | 持久文本布局 | [text.ts](../src/render/text.ts) | 缓存字体和文字对应的分行、测量宽度，最多 256 项，换谱清空；仍由 Canvas 按最终变换绘字，保留现有旋转/缩放质量。 |
 | 有界并发图片解码 | [textures.ts](../src/render/textures.ts) | 最多 4 个解码任务；同 Blob 的别名仍只解码一次、释放一次。失败时等待全部在途任务结束，释放成功解码的图像，避免迟到任务泄漏。 |
 | Worker 池几何准备 | [prepare.ts](../src/chart/geometry/prepare.ts)、[geometry.ts](../src/render/geometry.ts)、[geometryworker.ts](../src/render/geometryworker.ts) | 1–4 个 module Worker 按连续音符索引分片，并行计算音符控制几何；谱面 DTO 每 Worker 装载一次，输出 Float64Array 通过 transfer 传递并往返复用。实时 ≥512 音符启用，较小谱面同步；导出等待精确时间帧。 |
+| OffscreenCanvas 音符绘制 | [notelayer.ts](../src/render/notelayer.ts)、[noteworker.ts](../src/render/noteworker.ts) | 支持时录制音符层 Canvas 命令，专用 Worker 绘制到透明 OffscreenCanvas，返回 ImageBitmap。主线程按判定线→音符→打击特效→HUD 的顺序合成，合成后立即 close。 |
 
 ## Worker 调度与同步
 
@@ -27,7 +28,9 @@
 - 换谱使用 generation/request ID 拒绝旧回复；等待期间发生 seek、播放状态/速度、尺寸、宽高比、偏移或场景变化时跳过捕获帧。
 - 离线编码器先等待异步绘帧完成，再读取 Canvas；等待后再次检查取消信号。
 - 不支持 Worker、池创建失败、任一 Worker 错误、结果尺寸不符或超过 2 秒未完成时，终止整个池、丢弃部分结果，使用同一个纯几何函数同步回退。
-- 当前是多 Worker 准备 / 主线程顺序提交，未把 Canvas 移到 OffscreenCanvas；逐帧等待存在消息往返成本，未承诺一定提升 FPS。
+- 几何池之外另有一个音符绘制 Worker；主线程保留可见性、Hold 布局、染色选择，录制 alpha、clip、变换与 sprite 命令。Worker 执行 Canvas 2D 绘图，主线程等待 ImageBitmap 后继续同一帧。逐帧消息、命令克隆和全尺寸图层合成有成本，未承诺一定提升 FPS。
+- 音符 Worker 的 sprite 使用 createImageBitmap 复制后转移，不转移主线程原图；最多缓存 256 张，超限重建 Worker。输出位图合成后 close，过期回复也 close。换谱终止 Worker 并重置缓存。
+- 不支持 OffscreenCanvas 或 Worker 绘制失败/超时，主线程重放同一批命令；入场/结束过渡预览保持同步直接绘制。实时和离线正常游戏帧共用异步合成顺序，编码器等绘制完成后才读取 Canvas。
 
 ## 已有机制与未直接套用的部分
 
@@ -35,7 +38,7 @@
 - Canvas 2D 不提供合并任意 `drawImage`/`fillText` 为一次 instanced draw 的 API。Rust 顶点桶和静态 quad 索引适用于真正的 WebGL 音符渲染器，不能仅改数据结构就获得同样收益。
 - 空间去重会少画叠音符/粒子，需要独立画质选项和视觉验证；本次没有改变画面数量、绘制顺序或粒子随机序列。
 - 活动音符游标必须同时处理负流速、Hold、fake、手动判定、自动播放音效和任意 seek，不能把原生引擎的 NoteGroup 结构直接替换进当前播放器。
-- Worker 池已支持音符分块；文本准备和 OffscreenCanvas 绘制需要继续拆分资源所有权并测量通信成本。
+- Worker 池已支持音符分块，OffscreenCanvas 已支持音符层；判定线文字、图片、HUD、粒子和最终 WebGL 后期仍由主线程绘制。
 - FFmpeg.wasm 项目已依赖 `core-mt`。多线程不是 WASM 无法实现的能力，是否使用取决于导出加载器和跨源隔离条件；本次未改编码设置。
 
 ## 验证

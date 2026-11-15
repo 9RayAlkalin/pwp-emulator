@@ -35,6 +35,7 @@ import { lineVisualKind, orderedLines, rpeLineSize } from '../chart/geometry/lin
 import { renderGameplayFrame, type FramePasses } from '../render/frame';
 import { LineTextLayout } from '../render/text';
 import { GeometryPipeline } from '../render/geometry';
+import { NoteCommands, NoteLayer, replayNotes } from '../render/notelayer';
 
 // Original rendering state includes optional uniforms for chart-specific effect passes.
 const C: any = {
@@ -2048,11 +2049,12 @@ const game_chart_viewport = () => chartViewport(cv.width, cv.height, resolveChar
 const lineTextLayout = new LineTextLayout();
 const preparedLines = new Map<any, { state: number[]; floor: number }>();
 const geometryPipeline = new GeometryPipeline();
+const noteLayer = new NoteLayer();
 const geometryTime = (musicTime: number) => musicTime - C.chart.data.offset + settings.offset / 1000;
 
 /* mode: undefined=整帧（普通谱）| "bg"=只画曲绘（异象分层的背景画布）|
    "fg"=只画判定线/note/打击特效+方块 mask（透明底）。 */
-const render_scene = (sctx, t, mode?, preview = false) => {
+const render_scene = (sctx, t, mode?, preview = false, offscreen = false) => {
     if (!preview) C.openingPreview = null;
     const [w, h] = [cv.width, cv.height];
     const adapted = hasChartViewport(C.chart.data), viewport = game_chart_viewport();
@@ -2156,6 +2158,14 @@ const render_scene = (sctx, t, mode?, preview = false) => {
         sctx.restore();
     }
     // All judgement lines precede all notes, including notes from other lines.
+    const destination = sctx;
+    const batch = offscreen && noteLayer.supported() ? new NoteCommands() : undefined;
+    const sceneChart = C.chart, sceneGeneration = clockGeneration;
+    if (batch) {
+        sctx = batch.context;
+        sctx.save();
+        if (adapted) { sctx.beginPath(); sctx.rect(viewport.left, 0, viewport.width, h); sctx.clip(); }
+    }
     for (const note of C.chart.renderNotes) {
         const line = note.master;
         const prepared = preparedLines.get(line)!;
@@ -2321,15 +2331,30 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             sctx.restore();
     }
 
-    const effects = settings.autoplay || C.video_export_active
-        ? activeHitEffects(C.chart.data.click_effect_collection, t, settings.speed)
-        : judge.hitEffects;
-    if (!preview) hit_effects.draw(sctx, effects, t, w, h, settings.noteScale, settings.speed);
+    const finish = () => {
+        const effects = settings.autoplay || C.video_export_active
+            ? activeHitEffects(C.chart.data.click_effect_collection, t, settings.speed)
+            : judge.hitEffects;
+        if (!preview) hit_effects.draw(destination, effects, t, w, h, settings.noteScale, settings.speed);
+        destination.restore();
+    };
+    if (!batch) { finish(); return; }
     sctx.restore();
+    return noteLayer.draw(batch, w, h).then(image => {
+        try {
+            if (sceneChart !== C.chart || sceneGeneration !== clockGeneration || w !== cv.width || h !== cv.height) {
+                destination.restore();
+                throw new Error('音符绘制期间帧状态已改变，跳过旧帧');
+            }
+            if (image) { destination.globalAlpha = 1; destination.drawImage(image, 0, 0); }
+            else replayNotes(destination, batch.commands, batch.images);
+            finish();
+        } finally { image?.close(); }
+    });
 };
 
 const framePasses: FramePasses = {
-    drawScene: render_scene,
+    drawScene: (context, time, layer) => render_scene(context, time, layer, false, true),
     drawHud: (context, musicTime) => draw_game_hud(context, musicTime),
     drawBlocks: render_blocks,
     composite: apply_postfx,
@@ -2337,7 +2362,7 @@ const framePasses: FramePasses = {
 
 /* 渲染「某一时刻」的一帧。时间轴 = get_time() 域（秒，即音乐秒），内部再减谱面 offset。
    实时播放（render）与视频导出（export_video）都走这一条路径 —— 导出画面 == 播放画面。 */
-const render_frame_at = (t_raw) => {
+const render_frame_at = async (t_raw) => {
     if (!cv.width || !cv.height) return;
     const t = t_raw - C.chart.data.offset + (settings.offset / 1000);
     if (settings.autoplay || C.video_export_active) update_game_score(t);
@@ -2362,7 +2387,7 @@ const render_frame_at = (t_raw) => {
        （原版 BackCanvas B/2 在判定线/note 之下）。无方块谱仍整帧。 */
     const has_blocks = !!(C.chart.blocks && C.chart.blocks.length);
     const split = !!(((C.postfx_enabled && C.fx_eff) || has_blocks) && C.fx && !C.fx_failed);
-    renderGameplayFrame({ output: cv, foreground: C.scene_cv, background: C.bg_cv }, t, t_raw, split, framePasses);
+    await renderGameplayFrame({ output: cv, foreground: C.scene_cv, background: C.bg_cv }, t, t_raw, split, framePasses);
 };
 
 const render = async () => {
@@ -2413,7 +2438,7 @@ const render = async () => {
                     generation !== clockGeneration || running !== clock.running || speed !== settings.speed || aspect !== game_chart_viewport().aspect ||
                     width !== cv.width || height !== cv.height || chartTime !== geometryTime(t_raw) ||
                     Math.abs(get_time() - t_raw) > .1) return;
-                render_frame_at(t_raw);
+                await render_frame_at(t_raw);
                 update_progress(t_raw);
                 drawSceneOverlay(cv.getContext('2d')!);
             } else {
@@ -2477,7 +2502,7 @@ const render_export_frame = async (plan: ExportTimeline, time: number, view: Par
     const frame = exportFrame(plan, time), ctx = cv.getContext('2d')!;
     if (frame.scene === 'game') {
         await geometryPipeline.exact(geometryTime(frame.musicTime), game_chart_viewport().aspect);
-        render_frame_at(frame.musicTime);
+        await render_frame_at(frame.musicTime);
     }
     else if (frame.scene === 'game-opening' || frame.scene === 'game-over') {
         if (frame.scene === 'game-over') update_game_score(frame.musicTime - C.chart.data.offset + settings.offset / 1000);
@@ -2546,7 +2571,7 @@ const export_video = async (opt: ExportScenes & { backend?: ExportBackend; encod
             C.fx_eff._frozen = start >= C.fx_eff.scalars.freezeTime;
         }
         resize_canvases(w, h);
-        render_frame_at(start);          // 预热：RT 按新尺寸重建、贴图上传（不计进度）
+        await render_frame_at(start);          // 预热：RT 按新尺寸重建、贴图上传（不计进度）
 
         const status = (message: string) => { video_export.status = message; export_ui_progress(true); };
         let audio: AudioBuffer | undefined;
@@ -2783,6 +2808,7 @@ const rebuild_click_effects = () => {
 const init_chart = () => {
     const data = C.chart.data;
     lineTextLayout.clear();
+    noteLayer.reset();
     preparedLines.clear();
     const lineState = createLineStateResolver(data.judgeLineList, () => game_chart_viewport().aspect);
 

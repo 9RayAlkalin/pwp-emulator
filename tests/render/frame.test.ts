@@ -4,10 +4,18 @@ import { renderGameplayFrame, type FrameTargets, type FramePasses } from '../../
 const canvas = (name: string) => ({ name, getContext: () => ({ name }) }) as unknown as HTMLCanvasElement;
 const targets: FrameTargets = { output: canvas('output'), foreground: canvas('foreground'), background: canvas('background') };
 
+it('waits for worker drawing before HUD and final compositing', async () => {
+  let done!: () => void;
+  const draw = new Promise<void>(resolve => { done = resolve; }), hud = vi.fn(), composite = vi.fn();
+  const pending = renderGameplayFrame(targets, 0, 0, false, { drawScene: () => draw, drawHud: hud, drawBlocks: vi.fn(), composite });
+  expect(hud).not.toHaveBeenCalled(); done(); await pending;
+  expect(hud).toHaveBeenCalledOnce(); expect(composite).toHaveBeenCalledOnce();
+});
+
 it.each([false, true])('keeps one drawing order for playback/export with split=%s', split => {
   const calls: unknown[] = [];
   const passes: FramePasses = {
-    drawScene: (ctx,time,layer) => calls.push(['scene',(ctx as any).name,time,layer]),
+    drawScene: (ctx,time,layer) => { calls.push(['scene',(ctx as any).name,time,layer]); },
     drawHud: (ctx,time) => calls.push(['hud',(ctx as any).name,time]),
     drawBlocks: (ctx,time) => calls.push(['blocks',(ctx as any).name,time]),
     composite: (scene,output,time,bg) => calls.push(['composite',scene,output,time,bg]),
