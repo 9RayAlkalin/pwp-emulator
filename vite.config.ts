@@ -11,15 +11,40 @@ async function updateAvatarIndex() {
   if (await readFile(output, 'utf8').catch(() => '') !== data) await writeFile(output, data);
 }
 
+// Fengari's luaconf probes `process.env.FENGARICONF` while the module loads.
+// Browsers have no `process`; patching that read lets luaconf take its own
+// `typeof process === "undefined"` branch without defining a fake global.
+const fengariBrowser = (code: string) => code.replaceAll('process.env.FENGARICONF', 'undefined');
+
 export default defineConfig({
   base: './',
   publicDir: false,
-  optimizeDeps: { entries: ['index.html'], include: ['@ffmpeg/ffmpeg'] },
+  optimizeDeps: {
+    entries: ['index.html'],
+    include: ['@ffmpeg/ffmpeg'],
+    esbuildOptions: {
+      plugins: [{
+        name: 'fengari-browser',
+        setup(build: any) {
+          build.onLoad({ filter: /fengari[\\/]src[\\/]luaconf\.js$/ }, async (args: any) => ({
+            contents: fengariBrowser(await readFile(args.path, 'utf8')),
+            loader: 'js',
+          }));
+        },
+      }],
+    },
+  },
   server: {
     allowedHosts: ['pwp.arkra.cc.cd'],
     watch: { ignored: ['**/verification-edge-profile/**'] },
   },
   plugins: [{
+    name: 'fengari-browser',
+    enforce: 'pre',
+    transform(code, id) {
+      return /fengari[\\/]src[\\/]luaconf\.js$/.test(id) ? fengariBrowser(code) : undefined;
+    },
+  }, {
     name: 'simulator-resources',
     async buildStart() { await updateAvatarIndex(); },
     configureServer(server) {

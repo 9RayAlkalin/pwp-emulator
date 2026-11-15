@@ -6,7 +6,7 @@ export function metadataKey(key: string): string {
   return aliases[key] ?? key;
 }
 export function metadataFields(value: Record<string, unknown>): MetadataFields {
-  return Object.fromEntries(Object.entries(value).filter(([, v]) => typeof v === 'string' || typeof v === 'number')
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
     .map(([k, v]) => [metadataKey(k), String(v)]));
 }
 
@@ -31,7 +31,8 @@ export function parseInfoText(text: string): MetadataFields[] {
 // metadata (tags etc.); reject unsupported syntax in fields used for import.
 export function parseInfoYaml(text: string): MetadataFields {
   const result: MetadataFields = {}, lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
-  const used = new Set(['name', 'level', 'music', 'image', 'chart', 'composer', 'charter', 'illustrator', 'format', 'offset', 'aspectratio']);
+  const used = new Set(['name', 'level', 'music', 'image', 'chart', 'composer', 'charter', 'illustrator', 'format', 'offset', 'aspectratio',
+    'userpen', 'linelength', 'backgrounddim', 'noteuniformscale', 'holdpartialcover']);
   for (let i = 0; i < lines.length; i++) {
     const match = lines[i].match(/^([\w-]+):(?:\s+(.*)|\s*)$/);
     if (!match) continue;

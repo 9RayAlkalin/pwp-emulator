@@ -177,3 +177,18 @@ it('preserves the chart aspect ratio from info.yml and rejects invalid ratios', 
   expect(result[0].data.aspectRatio).toBeCloseTo(4 / 3);
   await expect(importFiles([await archive({ ...files, 'info.yml': 'chart: chart.pec\naspectRatio: 0' })], () => {})).rejects.toThrow('aspectRatio');
 });
+
+it('imports RPEN in its own parser with package-scoped shader resources and extra.json fallback',async()=>{
+  const raw={META:{song:'song.ogg'},BPMList:[{startTime:[0,0,1],bpm:120}],judgeLineList:[{eventLayers:[],notes:[]}]};
+  const effect={shader:'glitch',global:true,start:[0,0,1],end:[4,0,1],vars:{power:.03}};
+  const pack=await archive({'pack/score.rpen':JSON.stringify(raw),'pack/info.yml':'chart: score.rpen\nuseRpen: true\nbackgroundDim: 0.3\nlineLength: 6\nholdPartialCover: false\nnoteUniformScale: false',
+    'pack/song.ogg':'music','pack/extra.json':JSON.stringify({effects:[effect]}),
+    'pack/shader/NoiseField/config.json':'{"version":1}', 'pack/shader/NoiseField/main.glsl':'uniform sampler2D screenTexture;',
+    'pack/shader/NoiseField/tex/noise.png':'texture'});
+  const second=await archive({'chart.json':JSON.stringify(chart()),'music.ogg':'song','shader/other.glsl':'unrelated'},'other.zip');
+  const [result]=await importFiles([pack,second],()=>{});
+  expect(result.data.sourceFormat).toBe('rpen');expect(result.data.rpen).toMatchObject({backgroundDim:.3,lineLength:6,holdPartialCover:false,noteUniformScale:false});
+  expect(result.data.rpen!.effects).toHaveLength(1);
+  expect(Object.keys(result.shaderAssets!)).toEqual(['shader/NoiseField/config.json','shader/NoiseField/main.glsl','shader/NoiseField/tex/noise.png']);
+  expect(await result.shaderAssets!['shader/NoiseField/main.glsl'].text()).toBe('uniform sampler2D screenTexture;');
+});

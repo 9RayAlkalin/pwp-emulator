@@ -6,6 +6,7 @@ export interface FrameTargets {
 export interface FramePasses {
   drawScene(context: CanvasRenderingContext2D, time: number, layer?: 'bg' | 'fg'): void;
   drawHud(context: CanvasRenderingContext2D, musicTime: number): void;
+  beforeHud?(context: CanvasRenderingContext2D, chartTime: number): void;
   drawBlocks(context: CanvasRenderingContext2D, time: number): void;
   composite(scene: HTMLCanvasElement, output: HTMLCanvasElement, time: number, background: HTMLCanvasElement | null): void;
 }
@@ -18,6 +19,7 @@ export function renderGameplayFrame(targets: FrameTargets, chartTime: number, mu
     passes.drawScene(targets.foreground.getContext('2d')!, chartTime, 'fg');
   } else passes.drawScene(targets.foreground.getContext('2d')!, chartTime);
   const foreground = targets.foreground.getContext('2d')!;
+  passes.beforeHud?.(foreground, chartTime);
   passes.drawHud(foreground, musicTime);
   passes.drawBlocks(foreground, chartTime);
   passes.composite(targets.foreground, targets.output, chartTime, split ? targets.background : null);

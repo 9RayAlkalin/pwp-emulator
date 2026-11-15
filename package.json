@@ -3,7 +3,9 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "packageManager": "pnpm@10.11.0",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -16,7 +18,9 @@
     "@ffmpeg/core": "0.12.10",
     "@ffmpeg/core-mt": "0.12.10",
     "@ffmpeg/ffmpeg": "0.12.15",
-    "jszip": "^3.10.1"
+    "fengari": "^0.1.5",
+    "jszip": "^3.10.1",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

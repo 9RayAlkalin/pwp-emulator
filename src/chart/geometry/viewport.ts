@@ -25,5 +25,5 @@ export function chartViewport(width: number, height: number, aspect = defaultCha
 }
 
 export function hasChartViewport(data?: ChartData): boolean {
-  return data?.sourceFormat === 'rpe' || data?.sourceFormat === 'pec';
+  return data?.sourceFormat === 'rpe' || data?.sourceFormat === 'rpen' || data?.sourceFormat === 'pec' || data?.sourceFormat === 'zepc';
 }

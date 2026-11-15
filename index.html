@@ -9,13 +9,13 @@
     <h2>pwp-emulator | Code by 9RayAlkalin</h2>
     <fieldset id="catalog">
         <legend>谱面</legend>
-        <p><label>导入 <input id="file-input" type="file" multiple accept=".pez,.zip" disabled></label></p>
+        <p><label>导入 <input id="file-input" type="file" multiple accept=".pez,.zip,.zepc,.yaml,.yml,.json,.pec,.rpe,.rpen" disabled></label></p>
         <p>
             <label>搜索 <input id="search" type="search" placeholder="曲名、曲师、谱师"></label>
             <label>难度 <select id="filter"><option value="">全部</option><option>EZ</option><option>HD</option><option>IN</option><option>AT</option><option>SP</option><option value="LOCAL">本地</option></select></label>
         </p>
         <p><label>谱面 <select id="chart-select" disabled><option>正在启动…</option></select></label> <button id="load-chart" disabled>加载</button> <span id="catalog-count"></span></p>
-        <small>支持 官谱、PEC、RPE；也可拖入文件。导入仅保留在当前页面会话。</small>
+        <small>支持 官谱、PEC、RPE、RPEN、ZEPC 曲包/谱面；也可拖入文件。ZEPC 与 Lua 格式见 docs/zepc.md。导入仅保留在当前页面会话。</small>
     </fieldset>
     <fieldset id="chart-info" disabled>
         <legend>谱面信息</legend>
@@ -24,7 +24,7 @@
         <p><label>难度 / 等级 <input data-info="level" type="text" placeholder="IN Lv.15"></label></p>
     </fieldset>
     <p id="toast" role="status" aria-live="polite" hidden></p>
-    <p id="drop-zone" hidden>松开以导入谱面（PEZ / ZIP）。</p>
+    <p id="drop-zone" hidden>松开以导入谱面（PEZ / ZIP / ZEPC / YAML）。</p>
     <p id="loading-overlay" hidden><span id="loading-label">正在启动</span> <progress id="loading-fill" max="100" value="0"></progress> <span id="loading-text"></span></p>
     <fieldset>
         <legend>游玩</legend>
@@ -59,7 +59,7 @@
         <p><label>背景亮度 <input data-setting="brightness" type="range" min="0" max="1" step="0.01"><output></output></label></p>
         <p><label>音符大小 <input data-setting="noteScale" type="range" min="0.5" max="1.5" step="0.05"><output></output></label></p>
         <p><label>谱面宽高比（宽 ÷ 高）<input data-setting="chartAspectRatio" type="number" min="0" max="4" step="any" list="chart-aspect-presets" value="0"></label>
-            <small>0 跟随谱面；例如 1.5 为 3:2，1.7777777777777777 为 16:9。仅对 PEC / RPE 生效，立即应用并保存。</small></p>
+            <small>0 跟随谱面；例如 1.5 为 3:2，1.7777777777777777 为 16:9。对 PEC / RPE / RPEN / PWP 生效，非零时覆盖谱面自带比例，立即应用并保存。</small></p>
         <datalist id="chart-aspect-presets"><option value="0">跟随谱面</option><option value="1.3333333333333333">4:3</option><option value="1.5">3:2</option><option value="1.7777777777777777">16:9</option><option value="2.3333333333333335">21:9</option></datalist>
         <p><label>判定偏移 (ms) <input data-setting="offset" type="number" min="-500" max="500" step="1"></label> <small>正值提前判定</small></p>
         <p><label><input data-setting="apFcIndicator" type="checkbox">FC/AP 指示器</label> <label><input data-setting="effects" type="checkbox">后期与异象特效</label> <label><input data-setting="fullscreen" type="checkbox">开始时全屏</label></p>

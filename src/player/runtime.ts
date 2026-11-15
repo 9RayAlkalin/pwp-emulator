@@ -33,6 +33,9 @@ import { applyHudAttachment, gameHudLayout, hudAttachment, hudPointCovered, inve
 import { chartViewport, hasChartViewport, resolveChartAspect } from '../chart/geometry/viewport';
 import { lineVisualKind, orderedLines, rpeLineSize } from '../chart/geometry/lines';
 import { renderGameplayFrame, type FramePasses } from '../render/frame';
+import { RpenRenderer } from '../render/rpen';
+import { blockingNoiseAt } from '../gameplay/noise';
+import { createScriptHost, type ScriptAction, type ScriptGrade, type ScriptHost, type ScriptNote, type ScriptState } from '../chart/script/lua';
 
 // Original rendering state includes optional uniforms for chart-specific effect passes.
 const C: any = {
@@ -129,6 +132,11 @@ const cv = document.querySelector<HTMLCanvasElement>("#main-canvas")!;
 const actx = new AudioContext();
 let settings: Settings;
 const judge = new Judge();
+let chartScript: ScriptHost | null = null;
+let scriptLineIndex = new Map<any, number>();
+let scriptLastTime = 0;
+let scriptActionsActive = false;
+let scriptReportedErrors = new Set<string>();
 let judgeFrameTime = 0;
 let judgementSeconds = 0;
 judge.now = () => judgementSeconds + (clock.running ? Math.max(0, (performance.now() - judgeFrameTime) / 1000) : 0);
@@ -136,7 +144,14 @@ const hit_effects = new HitEffectRenderer();
 const originalUI = new Scene();
 const blockFeedback = new BlockTouchFeedback();
 const blockAudio = new MusicLowPass(actx);
-judge.isBlocked = (x, y, time, width, height) => C.block_enabled && !!blockingBlockAt(C.chart.blocks || [], time, x, y, width, height);
+judge.isBlocked = (x, y, time, width, height) => {
+    if (!C.block_enabled) return false;
+    if (C.chart.data?.rpen) {
+        const viewport = game_chart_viewport();
+        return !!blockingNoiseAt(C.chart.data.rpen.areas, time, x-width/2, height/2-y, viewport.width, height);
+    }
+    return !!blockingBlockAt(C.chart.blocks || [], time, x, y, width, height);
+};
 const clear_block_input = (immediate = false) => {
     judge.clearInput();
     blockFeedback.clear();
@@ -1951,6 +1966,16 @@ const apply_postfx = (src, dst, t, bg) => {
         dctx.drawImage(src, 0, 0);
     };
 
+    if (C.chart.rpen) {
+        const viewport = game_chart_viewport();
+        const context = src.getContext('2d')!;
+        C.chart.rpen.noiseStage(context, viewport, t, t + C.chart.data.offset,
+            settings.autoplay || C.video_export_active || !clock.running ? [] : judge.blockedTouches, performance.now()/1000);
+        C.chart.rpen.effectsStage(context, viewport, t, true, C.postfx_enabled);
+        flat();
+        return;
+    }
+
     // Blocks are scene content. Their WebGL materials remain active when post-processing is disabled.
     if (C.fx_failed || (!C.postfx_enabled && !C.chart.blocks?.length)) {
         flat();
@@ -2043,6 +2068,74 @@ const resize_to_window = () => {
 
 const game_chart_viewport = () => chartViewport(cv.width, cv.height, resolveChartAspect(C.chart.data?.aspectRatio, settings?.chartAspectRatio));
 
+/* ---------------- PWP 脚本状态 ---------------- */
+
+const script_note = (note: RuntimeNote): ScriptNote => {
+    const line = note.master as any;
+    const id = note.scriptId ?? '';
+    const index = Number(id.split(':')[1] || 0);
+    const types = ['tap', 'drag', 'hold', 'flick'];
+    return {
+        id, line: line.scriptIndex ?? 1, index,
+        type: (types[note.type - 1] ?? 'tap') as ScriptNote['type'],
+        time: note.sect, holdTime: note.secht,
+        x: note.positionX * C.units.pgrw + .5,
+        speed: note.speed, above: !!note.is_above, fake: !!note.isFake,
+    };
+};
+
+const script_state = (time: number): ScriptState => {
+    const autoplay = settings.autoplay || C.video_export_active;
+    const scoring = C.chart.scoring;
+    const stats = autoplay ? {
+        perfect: scoring?.perfect ?? 0, good: 0, bad: 0, miss: 0,
+        combo: scoring?.combo ?? 0, maxCombo: scoring?.max_combo ?? 0,
+        score: scoring?.score ?? 0, accuracy: scoring?.total ? (scoring.perfect ?? 0) / scoring.total * 100 : 100,
+        total: scoring?.total ?? 0,
+    } : judge.stats;
+    const duration = C.chart.duration || 0;
+    return {
+        time, duration, playing: clock.running,
+        progress: duration > 0 ? Math.max(0, Math.min(1, time / duration)) : 0,
+        score: stats.score, accuracy: stats.accuracy, combo: stats.combo, maxCombo: stats.maxCombo,
+        perfect: stats.perfect, good: stats.good, bad: stats.bad, miss: stats.miss, total: stats.total,
+    };
+};
+
+const script_time = () => get_time() - (C.chart.data?.offset ?? 0) + (settings?.offset ?? 0) / 1000;
+
+const report_script_errors = () => {
+    if (!chartScript || !C.chart.data) return;
+    for (const error of chartScript.errors) {
+        if (scriptReportedErrors.has(error)) continue;
+        scriptReportedErrors.add(error);
+        C.chart.data.warnings ??= [];
+        if (!C.chart.data.warnings.includes(error)) C.chart.data.warnings.push(error);
+        if (!lib_loading) events.dispatchEvent(new CustomEvent('error', { detail: `脚本：${error}` }));
+    }
+};
+
+const apply_script_actions = () => {
+    if (!chartScript || scriptActionsActive) return;
+    const actions: ScriptAction[] = chartScript.takeActions();
+    if (!actions.length) return;
+    scriptActionsActive = true;
+    try {
+        for (const action of actions) {
+            if (action.type === 'pause') pause();
+            else if (action.type === 'play') play();
+            else if (action.type === 'seek' && C.chart.data && !C.video_export_active && !lib_loading) seek(action.time);
+        }
+    } finally { scriptActionsActive = false; }
+};
+
+const dispose_script = () => {
+    chartScript?.dispose();
+    chartScript = null;
+    scriptLineIndex.clear();
+    scriptReportedErrors.clear();
+};
+
 /* mode: undefined=整帧（普通谱）| "bg"=只画曲绘（异象分层的背景画布）|
    "fg"=只画判定线/note/打击特效+方块 mask（透明底）。 */
 const render_scene = (sctx, t, mode?, preview = false) => {
@@ -2061,7 +2154,9 @@ const render_scene = (sctx, t, mode?, preview = false) => {
         sctx.drawImage(game_background(w, h).canvas, 0, 0);
         // GameInformation默认背景亮度=.75，LevelStart动画末尾CanvasGroup.alpha=.7。
         // LevelInformation.Update把黑色Image.alpha设成1-背景亮度；两者相乘为.175。
-        sctx.fillRectEx(0, 0, w, h, `rgba(0, 0, 0, ${1 - (settings?.brightness ?? 0.65)})`);
+        sctx.fillRectEx(0, 0, w, h, `rgba(0, 0, 0, ${C.chart.data.rpen?.backgroundDim ?? (1 - (settings?.brightness ?? 0.65))})`);
+        const tint = chartScript?.overlay.background;
+        if (tint) sctx.fillRectEx(0, 0, w, h, `rgba(${tint.color.map(Math.round).join(',')}, ${tint.alpha})`);
     }
     if (mode === "bg") return;   // 背景画布到此为止；前景在另一张画布上画
     sctx.save();
@@ -2089,10 +2184,17 @@ const render_scene = (sctx, t, mode?, preview = false) => {
     const indicatorColor = judgeLineColor(settings.apFcIndicator ?? true,
         settings.autoplay || C.video_export_active ? { good: 0, bad: 0, miss: 0 } : (C.line_status ?? judge.stats));
     for (const line of C.chart.renderLines) {
+        const scriptLine = chartScript?.overlay.lines.get(scriptLineIndex.get(line) ?? -1);
+        if (scriptLine?.visible === false) continue;
         let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
+        if (scriptLine?.alpha !== undefined) lineAlpha *= scriptLine.alpha;
         if (lineAlpha <= 0) continue;
         const appearance = lineAppearance(line, t);
+        if (scriptLine?.scale !== undefined) {
+            appearance.scaleX *= scriptLine.scale; appearance.scaleY *= scriptLine.scale;
+        }
         if (appearance.scaleX === 0 || appearance.scaleY === 0) continue;
+        const lineColor = scriptLine?.color ? `rgb(${scriptLine.color.map(Math.round).join(',')})` : appearance.color;
         const kind = lineVisualKind(line);
         if (kind === 'text' && !appearance.text) continue;
         lineX *= w; lineY *= h;
@@ -2110,7 +2212,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             sctx.translate(lineX, lineY); sctx.rotate(lineRotate * Math.PI / 180);
             sctx.scale(appearance.scaleX, appearance.scaleY);
             sctx.font = `${objectHeight * 60 / 900}px ${C.chart.fonts?.family(appearance.font) ?? 'PhiHUD, sans-serif'}`; sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
-            sctx.fillStyle = appearance.color || '#ffffff';
+            sctx.fillStyle = lineColor || '#ffffff';
             const rows = (appearance.text ?? '').split('\n');
             const textWidth = Math.max(...rows.map(text => sctx.measureText(text).width));
             const textHeight = rows.length * objectHeight * 72 / 900;
@@ -2118,7 +2220,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             rows.forEach((text, i) => sctx.fillText(text, (.5 - ax) * textWidth,
                 (ay - .5) * textHeight + (i - (rows.length - 1) / 2) * objectHeight * 72 / 900));
         } else if (kind === 'texture') {
-            const texture = C.chart.textures?.get(line.animation.texture, t, appearance.gifProgress, appearance.color, 'filter' in sctx,
+            const texture = C.chart.textures?.get(line.animation.texture, t, appearance.gifProgress, lineColor, 'filter' in sctx,
                 viewport.textureScale * Math.max(Math.abs(appearance.scaleX), Math.abs(appearance.scaleY)));
             if (texture) {
                 const [ax, ay] = line.animation.anchor ?? [.5, .5];
@@ -2128,10 +2230,11 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                 sctx.drawImage(texture.image, -ax * texture.width, (ay - 1) * texture.height, texture.width, texture.height);
             }
         } else {
-            const size = C.chart.data.sourceFormat === 'rpe' ? rpeLineSize(viewport.textureScale, appearance.scaleX, appearance.scaleY)
+            const size = ['rpe', 'rpen'].includes(C.chart.data.sourceFormat) ? rpeLineSize(viewport.textureScale, appearance.scaleX, appearance.scaleY)
                 : { halfLength: objectHeight * C.lineh * appearance.scaleX, width: Math.abs(objectHeight * C.linew * appearance.scaleY) };
+            if (C.chart.data.rpen?.lineLength !== undefined) size.halfLength = viewport.width * C.chart.data.rpen.lineLength / 2 * appearance.scaleX;
             sctx.drawLine(...rotate_point(lineX, lineY, size.halfLength, lineRotate),
-                ...rotate_point(lineX, lineY, size.halfLength, lineRotate + 180), size.width, appearance.color || indicatorColor);
+                ...rotate_point(lineX, lineY, size.halfLength, lineRotate + 180), size.width, lineColor || indicatorColor);
         }
         sctx.restore();
     }
@@ -2141,6 +2244,9 @@ const render_scene = (sctx, t, mode?, preview = false) => {
         let [lineRotate, lineX, lineY, lineAlpha] = line.get_state(t);
         if (line.animation && lineAlpha < 0) continue;
         lineX *= w; lineY *= h;
+        const scriptNote = chartScript?.overlay.notes.get(note.scriptId ?? '');
+        if (scriptNote?.visible === false) continue;
+        const note_tint = scriptNote?.tint ?? note.tint;
         const beatt = line.sec2beat(t);
         const linefp = get_fp(beatt, line.speedEvents);
             if (!preview && (settings.autoplay || C.video_export_active) && note.sect < t && !note.clicked) {
@@ -2168,7 +2274,11 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             const dist = note.floorPosition - linefp;
             if (line.animation) {
                 const tailDist = note.is_hold ? get_fp(note.time + note.holdTime, line.speedEvents) - linefp : dist;
-                if (line.animation.cover && note.sect >= t && dist * note.speed < -0.001 && tailDist * note.speed < -0.001) continue;
+                if (C.chart.data.sourceFormat === 'rpen') {
+                    // RPEN cover hides the whole note by its authored floor
+                    // (the tail for Holds). A stopped note stays fully visible.
+                    if (line.animation.cover && note.speed !== 0 && tailDist + (note.yOffset ?? 0) < 0) continue;
+                } else if (line.animation.cover && note.sect >= t && dist * note.speed < -0.001 && tailDist * note.speed < -0.001) continue;
             } else if (note.sect >= t && dist < -Math.max(note.floorPosition / 6000000, 0.001)) continue;
 
             // Scroll distances are height units. The viewport width controls
@@ -2180,7 +2290,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             if (note_fp > h * 2 && !(note.is_hold && line.animation) && !line.animation?.controls?.y) continue;
 
             const offsetPixels = (note.yOffset ?? 0) * note.speed * C.units.pgrh * h;
-            const activeHold = note.is_hold && t > note.sect && (!note.isFake || C.chart.data.sourceFormat === 'rpe');
+            const activeHold = note.is_hold && t > note.sect && (!note.isFake || ['rpe', 'rpen'].includes(C.chart.data.sourceFormat));
             const controlDistance = (activeHold ? 0 : dist * C.units.pgrh * (C.units.pgrbeat / line.bpm) * 900) + (note.yOffset ?? 0) * 540;
             const geometry = line.animation ? chartNoteGeometry(note, line.animation, t, controlDistance, note.is_above) : undefined;
             const controlSize = geometry?.size ?? 1;
@@ -2191,7 +2301,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                 C.note_head_imgs[note.type][1].width
                 / C.note_head_imgs[note.type][0].width
             ) : 1.0);
-            const this_note_width = base_note_width * (note.size ?? 1);
+            const this_note_width = base_note_width * (note.size ?? 1) * (scriptNote?.width ?? 1);
             const this_note_head_height = base_note_width / note_head_img.width * note_head_img.height;
             const l2n_rotate = lineRotate - (note.is_above ? 90 : -90);
             const note_atline_pos = rotate_point(...rotate_point(lineX, lineY,
@@ -2203,16 +2313,17 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             const note_draw_rotate = lineRotate + (note.is_above ? 0 : 180);
 
             sctx.save();
-            if (line.animation?.cover && !note.is_hold) {
+            if (C.chart.data.sourceFormat !== 'rpen' && line.animation?.cover && !note.is_hold) {
                 const matrix = sctx.getTransform(), reach = Math.hypot(w, h) + Math.abs(lineX) + Math.abs(lineY);
                 sctx.translate(lineX, lineY); sctx.rotate(lineRotate * Math.PI / 180);
                 sctx.beginPath(); sctx.rect(-reach, note.is_above ? -reach : 0, reach * 2, reach); sctx.clip(); sctx.setTransform(matrix);
             }
             sctx.globalAlpha = Math.max(0, Math.min(1, (note.alpha ?? 1) * (geometry?.alpha ?? 1))) *
+                (scriptNote?.alpha ?? 1) *
                 (note.is_hold ? result?.visualMissed ? gameplayMetrics.holdMissAlpha : 1 : lateNoteAlpha(note, t));
             if (draw_head && !note.is_hold) {
                 sctx.drawCenterRotateImage(
-                    sprite_tints.get(note_head_img, note.tint), ...note_head_pos,
+                    sprite_tints.get(note_head_img, note_tint), ...note_head_pos,
                     this_note_width, this_note_head_height,
                     note_draw_rotate, geometry?.skew ?? 0
                 );
@@ -2222,14 +2333,14 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                 const note_body_img = C.hold_body_imgs[note.morebets];
                 const note_tail_img = C.hold_tail_imgs[note.morebets];
                 const note_tail_height = base_note_width / note_tail_img.width * note_tail_img.height;
-                if (C.chart.data.sourceFormat === 'rpe') {
+                if (['rpe', 'rpen'].includes(C.chart.data.sourceFormat)) {
                     const endpoints = chartHoldSpan(note.floorPosition, get_fp(note.time + note.holdTime, line.speedEvents), linefp, activeHold);
                     const length = (endpoints[1] - endpoints[0]) * C.units.pgrh * h * note.speed;
                     const pieces = chartHoldLayout(length, this_note_head_height, note_tail_height, draw_head);
                     const origin = activeHold ? note_atline_pos : note_head_pos;
                     const drawPiece = (image, distance, height) => {
                         if (!(height > 0)) return;
-                        sctx.drawCenterRotateImage(sprite_tints.get(image, note.tint), ...rotate_point(...origin, distance, l2n_rotate),
+                        sctx.drawCenterRotateImage(sprite_tints.get(image, note_tint), ...rotate_point(...origin, distance, l2n_rotate),
                             this_note_width, height, note_draw_rotate, 0, pieces.direction);
                     };
                     drawPiece(note_body_img, pieces.bodyCenter, pieces.bodyHeight);
@@ -2273,13 +2384,13 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                     holdAngle);
 
                 sctx.drawCenterRotateImage(
-                    sprite_tints.get(note_body_img, note.tint), ...note_body_pos,
+                    sprite_tints.get(note_body_img, note_tint), ...note_body_pos,
                     this_note_width, note_body_height,
                     note_draw_rotate
                 );
 
                 // Native Hold adds body renderer first, then head, then tail.
-                if (draw_head) sctx.drawCenterRotateImage(sprite_tints.get(note_head_img, note.tint), ...note_head_pos,
+                if (draw_head) sctx.drawCenterRotateImage(sprite_tints.get(note_head_img, note_tint), ...note_head_pos,
                     this_note_width, this_note_head_height, note_draw_rotate);
 
                 const note_tail_pos = rotate_point(
@@ -2289,7 +2400,7 @@ const render_scene = (sctx, t, mode?, preview = false) => {
                 );
 
                 sctx.drawCenterRotateImage(
-                    sprite_tints.get(note_tail_img, note.tint), ...note_tail_pos,
+                    sprite_tints.get(note_tail_img, note_tint), ...note_tail_pos,
                     this_note_width, note_tail_height,
                     note_draw_rotate
                 );
@@ -2297,16 +2408,26 @@ const render_scene = (sctx, t, mode?, preview = false) => {
             sctx.restore();
     }
 
-    const effects = settings.autoplay || C.video_export_active
-        ? activeHitEffects(C.chart.data.click_effect_collection, t, settings.speed)
-        : judge.hitEffects;
-    if (!preview) hit_effects.draw(sctx, effects, t, w, h, settings.noteScale, settings.speed);
+    if (!preview && !C.chart.data.rpen) render_chart_hits(sctx,t);
     sctx.restore();
+};
+
+const render_chart_hits = (context: CanvasRenderingContext2D, time: number) => {
+    const effects = settings.autoplay || C.video_export_active
+        ? activeHitEffects(C.chart.data.click_effect_collection, time, settings.speed) : judge.hitEffects;
+    hit_effects.draw(context, effects, time, cv.width, cv.height, settings.noteScale, settings.speed);
 };
 
 const framePasses: FramePasses = {
     drawScene: render_scene,
-    drawHud: (context, musicTime) => draw_game_hud(context, musicTime),
+    beforeHud: (context, time) => {
+        if (!C.chart.data.rpen) return;
+        const viewport = game_chart_viewport();
+        C.chart.rpen?.effectsStage(context, viewport, time, false, C.postfx_enabled);
+        context.save(); context.beginPath(); context.rect(viewport.left,0,viewport.width,cv.height); context.clip();
+        render_chart_hits(context,time); context.restore();
+    },
+    drawHud: (context, musicTime) => { draw_game_hud(context, musicTime); draw_script_hud(context); },
     drawBlocks: render_blocks,
     composite: apply_postfx,
 };
@@ -2330,6 +2451,13 @@ const render_frame_at = (t_raw) => {
         C.game_hud.combo = judge.stats.combo;
     }
     update_block_feedback();
+    if (chartScript) {
+        const delta = Math.max(0, Math.min(.25, t - scriptLastTime));
+        scriptLastTime = t;
+        chartScript.update(clock.running || C.video_export_active ? delta : 0, script_state(t));
+        apply_script_actions();
+        report_script_errors();
+    }
     /* 异象分层：黑幕/kaleido/网格在原版挂在 SortingLayer=Background 的
        effect Canvas 上（画在判定线/note 之下），所以场景拆成
        「背景（曲绘）」与「判定线+note」两张画布分别进 GL。 */
@@ -2397,6 +2525,11 @@ const render = () => {
             events.dispatchEvent(new CustomEvent('frame', { detail: simulator.snapshot() }));
             if (clock.running && t_raw >= C.chart.duration + .2 && !finishSent) {
                 finishSent = true;
+                if (chartScript) {
+                    chartScript.finish(script_state(C.chart.duration));
+                    report_script_errors();
+                    chartScript.takeActions();
+                }
                 C.resultStats = simulator.snapshot().stats;
                 pause();
                 transitionScene('game-over');
@@ -2747,7 +2880,8 @@ const init_chart = () => {
     const data = C.chart.data;
     const lineState = createLineStateResolver(data.judgeLineList, () => game_chart_viewport().aspect);
 
-    for (const line of data.judgeLineList) {
+    for (const [lineIndex, line] of data.judgeLineList.entries()) {
+        line.scriptIndex = lineIndex + 1;
         line.speedEvents.sort((a, b) => a.startTime - b.startTime);
         line.judgeLineRotateEvents.sort((a, b) => a.startTime - b.startTime);
         line.judgeLineMoveEvents.sort((a, b) => a.startTime - b.startTime);
@@ -2767,7 +2901,8 @@ const init_chart = () => {
         line.notes = merge_notes(line.notesAbove, line.notesBelow);
         init_note_fp(line.notes, line.speedEvents);
 
-        for (const note of line.notes) {
+        for (const [noteIndex, note] of line.notes.entries()) {
+            note.scriptId = `${lineIndex + 1}:${noteIndex + 1}`;
             note.sect = line.beat2sec(note.time);
             note.secht = line.beat2sec(note.holdTime);
             note.hold_end_time = note.sect + note.secht;
@@ -2781,6 +2916,7 @@ const init_chart = () => {
         delete line.notesAbove;
         delete line.notesBelow;
     }
+    scriptLineIndex = new Map(data.judgeLineList.map((line, index) => [line, index + 1]));
 
     const highlightNotes = data.judgeLineList.flatMap(line => line.notes);
     const highlights = noteHighlights(highlightNotes, data.sourceFormat);
@@ -2808,6 +2944,7 @@ const init_chart = () => {
     }).filter(b => b.size.x > 1e-6 && b.size.y > 1e-6);
 
     let dur = C.chart.music.duration || 0;
+    for (const area of data.rpen?.areas ?? []) dur = Math.max(dur, area.disappear + data.offset);
     for (const b of C.chart.blocks) dur = Math.max(dur, b.disappearTime);
     for (const line of data.judgeLineList) {
         for (const note of line.notes) dur = Math.max(dur, note.hold_end_time + data.offset);
@@ -2916,6 +3053,7 @@ const load_chart = async (dir, assetDir?, anomaly?, imageUrl?) => {
         music.addEventListener("ended", music_ended);
     }
 
+    C.chart.rpen?.dispose();
     C.chart.textures?.dispose();
     C.chart.fonts?.dispose(); sprite_tints.clear(); hit_effects.clear();
     C.chart = { info, data, image, background, music, postfx, dir, assetDir: adir, blocks: [] };
@@ -3105,6 +3243,22 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
     ctx.restore();
 };
 
+const draw_script_hud = (ctx: CanvasRenderingContext2D) => {
+    const hud = chartScript?.overlay.hud;
+    if (!hud) return;
+    const size = Math.max(6, hud.size * cv.height);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = hud.alpha;
+    ctx.font = `${size}px PhiHUD, sans-serif`;
+    ctx.textAlign = hud.align;
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = hud.color ? `rgb(${hud.color.map(Math.round).join(',')})` : '#ffffff';
+    const rows = hud.text.split(/\r?\n/);
+    rows.forEach((row, index) => ctx.fillText(row, hud.x * cv.width, hud.y * cv.height + index * size * 1.2));
+    ctx.restore();
+};
+
 const drawGameplayTransition = (ctx: CanvasRenderingContext2D, elapsed: number, ending: boolean, musicTime = get_time()) => {
     const width = cv.width, height = cv.height, clip = ending ? 'LevelOver' : 'LevelStart_0';
     ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, width, height);
@@ -3283,6 +3437,7 @@ const seek = v => {
     v = Math.max(0, Math.min(C.chart.duration, v));
     if (!m.paused && !m.ended) m.currentTime = Math.min(v, m.duration);
     clock_seek(v);
+    C.chart.rpen?.reset();
     // 跳过的 note 视为已自动命中，避免跳转后补播全部历史打击音。
     reset_judge(v - C.chart.data.offset + settings.offset / 1000);
     if (settings.autoplay) preclick_notes(v);
@@ -3542,7 +3697,7 @@ const init_player = async () => {
     });
 };
 
-function reset_judge(time = -Infinity) {
+function reset_judge(time = -Infinity, notifyScript = true) {
     const notes: RuntimeNote[] = C.chart.data.judgeLineList.flatMap(line => line.notes);
     judge.reset(notes, time);
     judgementSeconds = 0;
@@ -3550,6 +3705,10 @@ function reset_judge(time = -Infinity) {
     judgeFrameTime = performance.now();
     clear_block_input(true);
     finishSent = false;
+    const scriptTime = Number.isFinite(time) ? time : Math.max(0, get_time() - C.chart.data.offset + settings.offset / 1000);
+    if (notifyScript) chartScript?.reset(script_state(scriptTime));
+    scriptLastTime = scriptTime;
+    report_script_errors();
 }
 
 export const simulator = {
@@ -3558,10 +3717,18 @@ export const simulator = {
     async init(initialSettings: Settings) {
         settings = initialSettings;
         judge.onHit = note => play_sound(note_sound(note));
+        judge.onJudge = (note, grade) => chartScript
+            ? chartScript.judge(script_note(note), grade, script_state(script_time())) : grade;
+        judge.onResult = (note, grade) => {
+            if (!chartScript) return;
+            chartScript.hit(script_note(note), grade, script_state(script_time()));
+            report_script_errors();
+        };
         await init_player();
     },
     async load(entry: { path: string; asset?: string; cover?: string; anomaly?: string; name?: string; level?: string; composer?: string; charter?: string; illustrator?: string }) {
         pause();
+        dispose_script();
         preparePlayback();
         C.loadingInfo = { name: entry.name, level: entry.level, composer: entry.composer, charter: entry.charter, illustrator: entry.illustrator };
         if (entry.cover) { const cover = new Image(); cover.src = R(entry.cover); C.loadingImage = cover; }
@@ -3575,6 +3742,7 @@ export const simulator = {
     },
     async loadLocal(chart: LocalChart) {
         pause();
+        dispose_script();
         preparePlayback();
         C.loadingInfo = chart.info; C.loadingImage = chart.image || null;
         if (!render_started) { render_started = true; render(); }
@@ -3582,31 +3750,43 @@ export const simulator = {
         const urls: string[] = [];
         let textures: ChartTextures | undefined;
         let fonts: ChartFonts | undefined;
+        let rpen: RpenRenderer | undefined;
         const url = (blob: Blob) => { const value = URL.createObjectURL(blob); urls.push(value); return value; };
         try {
             const music = await load_audioele(url(chart.music));
             const image = await load_img(chart.image ? url(chart.image) : R('/assets/builtin/s6/image.png'));
             textures = await ChartTextures.load(chart.textures);
             fonts = await ChartFonts.load(chart.fonts);
+            rpen = await RpenRenderer.load(chart.data.rpen, chart.shaderAssets);
             const hitsounds = Object.fromEntries(await Promise.all(Object.entries(chart.hitsounds ?? {}).map(async ([name, blob]) =>
                 [name, await actx.decodeAudioData(await blob.arrayBuffer())])));
             C.chart.music?.pause();
             C.chart.music?.remove();
             localUrls.forEach(value => URL.revokeObjectURL(value));
             localUrls = urls;
+            C.chart.rpen?.dispose();
             C.chart.textures?.dispose();
             C.chart.fonts?.dispose(); sprite_tints.clear(); hit_effects.clear();
             C.chart = { info: chart.info, data: structuredClone(chart.data), music, image, background: null,
-                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id, textures, fonts, hitsounds };
+                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id, textures, fonts, hitsounds, rpen };
             C.loadingImage = image; C.resultImage = image;
             C.postfx = chart.postfx || null;
             C.glitch_img = null;
             C.fx_eff = null;
             game_background_cache = null;
             init_chart();
-            reset_judge();
+            chartScript = chart.scripts?.length ? createScriptHost(chart.scripts) : null;
+            scriptReportedErrors.clear();
+            reset_judge(0, false);
+            chartScript?.load(script_state(0));
+            chartScript?.reset(script_state(0));
+            report_script_errors();
+            if (chartScript?.errors.length) {
+                chart.data.warnings ??= [];
+                for (const error of chartScript.errors) if (!chart.data.warnings.includes(error)) chart.data.warnings.push(error);
+            }
             this.ready();
-        } catch (error) { textures?.dispose(); fonts?.dispose(); urls.forEach(value => URL.revokeObjectURL(value)); throw error; }
+        } catch (error) { rpen?.dispose(); textures?.dispose(); fonts?.dispose(); urls.forEach(value => URL.revokeObjectURL(value)); throw error; }
         finally { lib_loading = false; }
     },
     ready() {

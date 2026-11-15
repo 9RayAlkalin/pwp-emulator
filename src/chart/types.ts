@@ -65,6 +65,7 @@ export interface ChartNote {
   tintHitEffects?: ChartColor;
   hitsound?: string;
   highlight?: 0 | 1 | 2;
+  scriptId?: string;
 }
 export interface ChartLine {
   bpm: number;
@@ -75,12 +76,14 @@ export interface ChartLine {
   judgeLineRotateEvents: ChartEvent[];
   judgeLineDisappearEvents: ChartEvent[];
   animation?: LineAnimation;
+  scriptIndex?: number;
 }
 export interface ChartData {
   formatVersion: number;
   offset: number;
   judgeLineList: ChartLine[];
-  sourceFormat?: 'phigros' | 'pec' | 'rpe';
+  sourceFormat?: 'phigros' | 'pec' | 'rpe' | 'rpen' | 'zepc';
+  rpen?: import('./formats/rpen').RpenData;
   warnings?: string[];
   aspectRatio?: number;
   [key: string]: unknown;

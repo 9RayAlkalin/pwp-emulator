@@ -14,10 +14,10 @@ pnpm dev
 功能：
 
 - 原生控件单页界面，使用原生选谱下拉框、Autoplay 复选框、搜索和折叠设置；始终提供内置 True Home, True World 演示。
-- 通过文件选择或拖放导入 PEZ / ZIP，或同时选择谱面、音频与可选曲绘。支持 Phigros v1/v3 JSON、PEC 和 RPE，按内容识别格式；支持变 BPM、分离 XY、分层事件、缓动、父子线、假音符及基本文字/颜色/缩放事件。适配范围见 [谱面导入说明](docs/chart-adapters.md)。
-- 支持 `info.yml` / `info.yaml`、`info.txt`、`info.csv`、`info.json`，以及 RPE `META`；`info.txt` 支持 `Name`、`Song`、`Picture`、`Chart`、`Level`、`Composer`、`Charter`、`Illustrator`。一首音乐可供多张谱面共享，多首音乐时需要明确填写对应关系。
+- 通过文件选择或拖放导入 PEZ / ZIP / ZEPC 曲包，或同时选择谱面、音频与可选曲绘。支持 Phigros v1/v3 JSON、PEC、RPE 和独立解析的 RPEN；支持变 BPM、分离 XY、分层事件、缓动、父子线、假音符及基本文字/颜色/缩放事件。ZEPC 曲包用 YAML 描述多难度，难度可覆盖音频、曲绘、后期特效、字体、贴图、打击音与 Lua 脚本，并可通过沙箱脚本读取状态、修改显示和触发播放控制，见 [ZEPC 曲包与 Lua 脚本](docs/zepc.md)。RPEN 支持噪域分层皮肤、多 pass GLSL 及谱面 shader 事件，见 [RPEN 说明](docs/rpen.md)；基础适配见 [谱面导入说明](docs/chart-adapters.md)。
+- 支持 `info.yml` / `info.yaml`、`info.txt`、`info.csv`、`info.json`，以及 RPE `META`；`info.txt` 支持 `Name`、`Song`、`Picture`、`Chart`、`Level`、`Composer`、`Charter`、`Illustrator`。一首音乐可供多张谱面共享，多首音乐时需要明确填写对应关系。ZEPC 清单资源以清单目录为根，谱面内引用会先查谱面目录，详见 [ZEPC 曲包与 Lua 脚本](docs/zepc.md)。
 - RPE 自定义判定线图片/GIF、纹理与文字锚点、`gifEvents` 进度，以及七种 `attachUI` HUD 绑定；移动、旋转和缩放后的暂停按钮保留对应点击区域。GIF 逐帧解码需要支持 ImageDecoder 的浏览器。
-- 设置中可调整 PEC/RPE 谱面宽高比（0 跟随 info.yml），即时生效并保存；HUD 保持原尺寸，左右定位在 cover 内侧。
+- 设置中可调整 PEC/RPE/RPEN/PWP 谱面宽高比（0 跟随谱面/info.yml），即时生效并保存；HUD 保持原尺寸，左右定位在 cover 内侧。
 - Autoplay 与手动 Tap / Drag / Hold / Flick 判定，多点触控、鼠标、键盘输入，分数、连击、准确率与结算；手动、Autoplay 和视频导出共用打击序列帧与粒子，Perfect 金色、Good 蓝色。
 - 手动触摸生效方块会锁定该手指至松开，并触发触摸光晕和音乐低通；支持移动/旋转方块、减算区域及多指，暂停与跳转会清理状态。规则与还原范围见 [Block 接触说明](docs/block-touch.md)。
 - 0.5–2 倍速、时间轴跳转、重开、偏移、音量、音符大小、背景亮度、全屏与特效开关。设置保存在浏览器；导入谱面只保留在当前页面会话。
@@ -36,8 +36,9 @@ pnpm dev
 ```text
 src/main.ts             应用界面、谱面库与设置交互
 src/app/                设置类型、默认值与持久化
-src/chart/import/       PEZ / ZIP / 松散文件导入、元数据与资源匹配
-src/chart/formats/      PEC / RPE 适配、事件编译与官谱缓动编号转换
+src/chart/import/       PEZ / ZIP / ZEPC 曲包 / 松散文件导入、元数据与资源匹配
+src/chart/formats/      Phigros / PEC / RPE / RPEN / PWP YAML 适配、事件编译与缓动编号转换
+src/chart/script/       PWP Lua 沙箱、钩子与脚本覆盖层
 src/chart/animation/    共用 RPE 缓动、分层事件与父子线状态
 src/chart/geometry/     视口、判定线、音符投影与 Hold 几何
 src/gameplay/           判定、统计、方块接触与打击反馈事件

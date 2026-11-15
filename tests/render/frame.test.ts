@@ -23,3 +23,10 @@ it('does not continue to HUD or compositing after a scene drawing error',()=>{
   expect(()=>renderGameplayFrame(targets,0,0,false,{drawScene:()=>{throw new Error('draw failed');},drawHud:hud,drawBlocks:blocks,composite})).toThrow('draw failed');
   expect(hud).not.toHaveBeenCalled();expect(blocks).not.toHaveBeenCalled();expect(composite).not.toHaveBeenCalled();
 });
+
+it('places RPEN local effects before HUD and keeps the final noise/global stages after it',()=>{
+  const calls:string[]=[];
+  renderGameplayFrame(targets,2,3,false,{drawScene:()=>{calls.push('scene');},beforeHud:()=>{calls.push('local');},
+    drawHud:()=>{calls.push('hud');},drawBlocks:()=>{calls.push('native-blocks');},composite:()=>{calls.push('noise/global');}});
+  expect(calls).toEqual(['scene','local','hud','native-blocks','noise/global']);
+});

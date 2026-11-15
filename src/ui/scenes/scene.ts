@@ -9,6 +9,20 @@ import { collectionReward, collectionVisible } from '../results/collection';
 
 type Vector = { x: number; y: number; z?: number; w?: number };
 type Data = Record<string, any>;
+
+// Chromium can leave Image.decode() pending for already-decoded images.
+// `complete` + load/error events cover both cached and in-flight images.
+function readyImage(image: HTMLImageElement): Promise<void> {
+  if (image.complete) {
+    return image.naturalWidth > 0 && image.naturalHeight > 0
+      ? Promise.resolve()
+      : Promise.reject(new Error(`图片加载失败：${image.src}`));
+  }
+  return new Promise((resolve, reject) => {
+    image.addEventListener('load', () => resolve(), { once: true });
+    image.addEventListener('error', () => reject(new Error(`图片加载失败：${image.src}`)), { once: true });
+  });
+}
 interface Component { id: number; classId: number; data: Data; script: string | Data; font?: Data; sprite?: { image: string; rect: Data; offset?: Vector }; points?: Vector[]; clips?: string[]; targets?: Record<string, string> }
 interface Node { id: string; transformId: number; name: string; path: string; parent: string | null; children: string[]; active: boolean; scale: Vector; position: Vector; rotation: Vector; anchorMin?: Vector; anchorMax?: Vector; anchoredPosition?: Vector; sizeDelta?: Vector; pivot?: Vector; components: Component[] }
 interface SceneData { nodes: Record<string, Node>; bindings: Record<string, Data> }
@@ -94,7 +108,7 @@ export class Scene {
     if (!response.ok) throw new Error(`Original UI scene data: ${response.status}`);
     this.data = await response.json();
     await Promise.all(Object.keys(this.data.textures).map(async name => {
-      const image = new Image(); image.src = asset('/assets/ui/' + name); await image.decode(); this.images.set(name, image);
+      const image = new Image(); image.src = asset('/assets/ui/' + name); await readyImage(image); this.images.set(name, image);
     }));
     const font = new FontFace('SceneHot', `url("${asset('/assets/fonts/SceneHot.ttf')}")`);
     document.fonts.add(await font.load());
@@ -118,7 +132,7 @@ export class Scene {
         // Keep literal '+' in the pathname so Vite's static resolver preserves it.
         const file = encodeURIComponent(entry.file).replace(/%2B/g, '+');
         const image = new Image(); image.src = this.assetPath('/assets/avatars/' + file);
-        await image.decode(); this.images.set('profile-' + id, image);
+        await readyImage(image); this.images.set('profile-' + id, image);
       })();
       this.avatarRequests.set(id, pending);
     }

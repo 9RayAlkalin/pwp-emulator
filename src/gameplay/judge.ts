@@ -24,6 +24,8 @@ export class Judge {
   results = new Map<RuntimeNote, Result>();
   stats: Statistics = this.empty();
   onHit: (note: RuntimeNote) => void = () => {};
+  onJudge: (note: RuntimeNote, grade: Grade) => Grade = (_note, grade) => grade;
+  onResult: (note: RuntimeNote, grade: Grade) => void = () => {};
   now: (() => number) | undefined;
   isBlocked: (x: number, y: number, time: number, width: number, height: number) => boolean = () => false;
   private contacts = new Map<string, Contact>();
@@ -125,11 +127,11 @@ export class Judge {
             else if (advances) {
               if ((result.safeFrames ?? 0) < 0) {
                 result.grade = 'miss'; result.holding = false; result.missed = true; result.completed = true;
-                this.count('miss');
+                this.count('miss'); this.onResult(note, 'miss');
               } else result.safeFrames = (result.safeFrames ?? 0) - 1;
             }
             if (!result.completed && time > note.hold_end_time - 0.22) {
-              result.completed = true; this.count(result.grade);
+              result.completed = true; this.count(result.grade); this.onResult(note, result.grade);
             }
           }
           if (time >= note.hold_end_time) result.holding = false;
@@ -157,16 +159,20 @@ export class Judge {
   }
   private hit(note: RuntimeNote, time: number, grade: Grade): void {
     this.armed.delete(note);
-    const holding = note.is_hold && (grade === 'perfect' || grade === 'good');
-    this.results.set(note, { grade, time, holding, safeFrames: holding ? 2 : undefined,
-      completed: !holding, missed: grade === 'miss', visualMissed: false });
-    note.clicked = grade === 'perfect' || grade === 'good';
+    const finalGrade = this.onJudge(note, grade) ?? grade;
+    const holding = note.is_hold && (finalGrade === 'perfect' || finalGrade === 'good');
+    this.results.set(note, { grade: finalGrade, time, holding, safeFrames: holding ? 2 : undefined,
+      completed: !holding, missed: finalGrade === 'miss', visualMissed: false });
+    note.clicked = finalGrade === 'perfect' || finalGrade === 'good';
     if (note.clicked) {
       this.onHit(note);
-      this.addEffect(note, time, grade as HitGrade);
+      this.addEffect(note, time, finalGrade as HitGrade);
     }
-    if (grade === 'bad' && note.type === 1) this.bad.push({ note, time, elapsed: 0, startedAt: this.now?.() ?? time });
-    if (!holding) this.count(grade);
+    if (finalGrade === 'bad' && note.type === 1) this.bad.push({ note, time, elapsed: 0, startedAt: this.now?.() ?? time });
+    if (!holding) {
+      this.count(finalGrade);
+      this.onResult(note, finalGrade);
+    } else this.onResult(note, finalGrade);
   }
   private addEffect(note: RuntimeNote, time: number, grade: HitGrade): void {
     this.effects.push({ ...createHitEffect(note, time, grade), elapsed: 0, startedAt: this.now?.() ?? time });

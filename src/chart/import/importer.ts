@@ -1,58 +1,21 @@
 import JSZip from 'jszip';
+import { parse as parseYaml } from 'yaml';
 import type { ChartData } from '../types';
 import type { LocalChart } from './types';
 import { parsePec } from '../formats/pec';
 import { parseRpe } from '../formats/rpe';
+import { isRpen, parseRpen } from '../formats/rpen';
+import { parseChart } from '../formats/parse';
+import { isZepcChart, parseZepcChart } from '../formats/zepc';
+import { isZepcManifest } from '../formats/manifest';
+import { importZepcPack } from './pack';
 import { metadataFields, parseInfoText, parseInfoYaml, type MetadataFields } from './metadata';
+
+export { parseChart } from '../formats/parse';
 
 interface Asset { name: string; blob: Blob; group: number; }
 const filename = (path: string) => path.replaceAll('\\', '/').split('/').pop() || path;
 const parent = (path: string) => path.slice(0, path.lastIndexOf('/') + 1);
-
-export function parseChart(value: unknown, format?: string): ChartData {
-  const hint = format?.trim().toLowerCase();
-  if (hint && !['pec', 'rpe', 'phi', 'phigros'].includes(hint)) throw new Error(`暂不支持谱面格式 ${format}`);
-  if (typeof value === 'string') {
-    const text = value.replace(/^\uFEFF/, '').trim();
-    if (hint === 'pec' || (!hint && !text.startsWith('{'))) return parsePec(text);
-    try { value = JSON.parse(text); } catch { throw new Error('谱面 JSON 解析失败'); }
-  }
-  if (hint === 'rpe' || (!hint && value && typeof value === 'object' && ('BPMList' in value || 'META' in value))) return parseRpe(value);
-  if (hint === 'pec') throw new Error('PEC 谱面必须为文本');
-  if (!value || typeof value !== 'object') throw new Error('谱面必须为 JSON 对象');
-  const chart = structuredClone(value) as ChartData;
-  if (![1, 3].includes(chart.formatVersion)) throw new Error(`暂不支持谱面版本 ${chart.formatVersion}，请使用 Phigros v1/v3 JSON`);
-  if (!Array.isArray(chart.judgeLineList) || !chart.judgeLineList.length) throw new Error('谱面缺少 judgeLineList');
-  if (!Number.isFinite(chart.offset)) chart.offset = 0;
-  for (const line of chart.judgeLineList) {
-    if (!Number.isFinite(line.bpm) || line.bpm <= 0) throw new Error('判定线 BPM 必须大于零');
-    for (const key of ['speedEvents', 'judgeLineMoveEvents', 'judgeLineRotateEvents', 'judgeLineDisappearEvents'] as const) {
-      if (!Array.isArray(line[key])) throw new Error(`判定线缺少 ${key}`);
-      for (const event of line[key]) {
-        if (!Number.isFinite(event.startTime) || !Number.isFinite(event.endTime) || event.endTime < event.startTime) throw new Error(`${key} 包含无效事件时间`);
-      }
-    }
-    // Version 1 packs XY coordinates into one integer (x * 1000 + y).
-    if (chart.formatVersion === 1) {
-      for (const event of line.judgeLineMoveEvents) {
-        const start = Number(event.start), end = Number(event.end);
-        event.start = Math.floor(start / 1000) / 880; event.start2 = start % 1000 / 520;
-        event.end = Math.floor(end / 1000) / 880; event.end2 = end % 1000 / 520;
-      }
-    }
-    for (const key of ['notesAbove', 'notesBelow'] as const) {
-      if (!Array.isArray(line[key])) line[key] = [];
-      for (const note of line[key]) {
-        if (![1, 2, 3, 4].includes(note.type) || !Number.isFinite(note.time) || !Number.isFinite(note.positionX) || !Number.isFinite(note.speed)) throw new Error('谱面包含无效音符');
-        if (!Number.isFinite(note.holdTime)) note.holdTime = 0;
-        if (note.holdTime < 0) throw new Error('Hold 时长不能为负数');
-      }
-    }
-  }
-  chart.formatVersion = 3;
-  chart.sourceFormat ??= 'phigros';
-  return chart;
-}
 
 function csvRows(text: string): Record<string, string>[] {
   const rows: string[][] = []; let row: string[] = [], field = '', quoted = false;
@@ -73,7 +36,7 @@ export async function importFiles(files: File[], progress: (text: string) => voi
   const assets: Asset[] = [];
   let group = 0;
   for (const file of files) {
-    if (/\.(pez|zip)$/i.test(file.name)) {
+    if (/\.(pez|zip|zepc)$/i.test(file.name)) {
       progress(`解压 ${file.name}`);
       try {
         const zip = await JSZip.loadAsync(file);
@@ -90,9 +53,27 @@ export async function importFiles(files: File[], progress: (text: string) => voi
   }
   const audio = assets.filter(asset => /\.(ogg|mp3|wav|m4a|flac)$/i.test(asset.name));
   const images = assets.filter(asset => /\.(png|jpe?g|webp|gif|bmp)$/i.test(asset.name));
+
+  // A ZEPC manifest owns its archive (or the loose selection). Parse those
+  // groups separately so their chart files are not mistaken for standalone
+  // charts and their per-difficulty covers/audio are matched by the manifest.
+  const manifests = new Map<number, Asset>();
+  for (const asset of assets) {
+    if (!/\.ya?ml$/i.test(asset.name) || /(?:^|\/)info\.(?:csv|json|txt|ya?ml)$/i.test(asset.name)) continue;
+    let value: unknown;
+    try { value = parseYaml((await asset.blob.text()).replace(/^\uFEFF/, '')); } catch { continue; }
+    if (!isZepcManifest(value)) continue;
+    if (manifests.has(asset.group)) throw new Error('一个压缩包只能包含一个 ZEPC 曲包清单（meta.yaml）');
+    manifests.set(asset.group, asset);
+  }
+  const packed: LocalChart[] = [];
+  for (const [group, manifest] of manifests) {
+    packed.push(...await importZepcPack(manifest, assets.filter(asset => asset.group === group), progress));
+  }
+  const normal = assets.filter(asset => !manifests.has(asset.group));
   const metadata: { fields: MetadataFields; dir: string; group: number; priority: number }[] = [];
   const parsed = new Map<Asset, unknown>(), texts = new Map<Asset, string>();
-  for (const asset of assets.filter(asset => /(?:^|\/)info\.(?:csv|json|txt|ya?ml)$/i.test(asset.name))) {
+  for (const asset of normal.filter(asset => /(?:^|\/)info\.(?:csv|json|txt|ya?ml)$/i.test(asset.name))) {
     const text = await asset.blob.text(), ext = asset.name.split('.').pop()!.toLowerCase();
     let rows: MetadataFields[], priority: number;
     try {
@@ -115,8 +96,18 @@ export async function importFiles(files: File[], progress: (text: string) => voi
       (!row.dir || key(value.name).startsWith(key(row.dir) + '/')) && key(filename(value.name)) === key(row.fields.chart));
     return candidates.length === 1 && candidates[0] === asset;
   }).sort((a, b) => b.priority - a.priority);
-  for (const asset of assets) {
-    if (audio.includes(asset) || images.includes(asset) || /(?:^|\/)(?:info\.(?:csv|txt|ya?ml)|__MACOSX)(?:$|\/)/i.test(asset.name)) continue;
+  for (const asset of normal) {
+    if (audio.includes(asset) || images.includes(asset) || /\.(?:glsl|frag|vert|mp4|webm|ttf|otf|woff2?|lua)$/i.test(asset.name) ||
+        /(?:^|\/)(?:info\.(?:csv|txt|ya?ml)|__MACOSX)(?:$|\/)/i.test(asset.name)) continue;
+    if (/\.ya?ml$/i.test(asset.name)) {
+      const text = (await asset.blob.text()).replace(/^\uFEFF/, '').trim();
+      let value: unknown;
+      try { value = parseYaml(text); } catch { throw new Error(`YAML 解析失败：${asset.name}`); }
+      if (!isZepcChart(value) && !associated(asset).some(row => row.fields.chart)) continue;
+      texts.set(asset, text);
+      parsed.set(asset, value);
+      continue;
+    }
     // A chart referenced by metadata may have any extension. For loose text
     // charts, content detection also covers .pec renamed to .txt or .rpe.
     if (!/\.(?:json|pec|rpe|txt)$/i.test(asset.name) && !associated(asset).some(row => row.fields.chart)) {
@@ -132,17 +123,39 @@ export async function importFiles(files: File[], progress: (text: string) => voi
   const charts: LocalChart[] = [];
   for (const [asset, text] of texts) {
     const raw = parsed.get(asset), name = asset.name, rows = associated(asset);
+    const isZepc = isZepcChart(raw);
     const isJsonChart = raw && typeof raw === 'object' && 'judgeLineList' in raw;
     const isPec = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s+(?:bp|n[1-4]|c[vpdarmf])\s/i.test(text);
     const explicit = rows.some(row => row.fields.chart);
-    if (!isJsonChart && !isPec && !explicit) continue;
+    if (!isJsonChart && !isPec && !isZepc && !explicit) continue;
     progress(`读取 ${filename(name)}`);
     const field = (key: string): string | undefined => rows.find(row => row.fields[key] !== undefined && row.fields[key] !== '')?.fields[key];
     let data: ChartData;
-    try { data = parseChart(raw ?? text, field('format')); }
+    const extra = parsed.get(assets.find(value => value.group === asset.group && key(value.name) === key(`${parent(name)}extra.json`))!);
+    try {
+      const hint = field('format');
+      data = isZepc ? parseZepcChart(raw) : (!hint && field('userpen')?.toLowerCase() === 'true') || hint?.trim().toLowerCase() === 'rpen' || (!hint && isRpen(raw))
+        ? parseRpen(raw, extra) : parseChart(raw ?? text, hint);
+    }
     catch (error) { throw new Error(`${filename(name)}：${error instanceof Error ? error.message : error}`); }
     const dir = parent(name);
-    const meta = isJsonChart && data.sourceFormat === 'rpe' ? (raw as { META?: Record<string, any> }).META : undefined;
+    const meta = isJsonChart && ['rpe', 'rpen'].includes(data.sourceFormat ?? '') ? (raw as { META?: Record<string, any> }).META : undefined;
+    if (data.rpen) {
+      for (const [key, target] of [['linelength', 'lineLength'], ['backgrounddim', 'backgroundDim']] as const) {
+        const raw = field(key);
+        if (raw === undefined) continue;
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < 0 || target === 'backgroundDim' && value > 1) throw new Error(`${filename(name)}：${key} 无效`);
+        data.rpen[target] = value;
+      }
+      for (const [key, target] of [['noteuniformscale', 'noteUniformScale'], ['holdpartialcover', 'holdPartialCover']] as const) {
+        const value = field(key);
+        if (value !== undefined) {
+          if (!['true', 'false'].includes(value.toLowerCase())) throw new Error(`${filename(name)}：${key} 必须为布尔值`);
+          data.rpen[target] = value.toLowerCase() === 'true';
+        }
+      }
+    }
     const declaredOffset = field('offset');
     if (declaredOffset !== undefined) {
       if (!Number.isFinite(Number(declaredOffset))) throw new Error(`${filename(name)}：元数据 offset 必须为秒数`);
@@ -195,17 +208,29 @@ export async function importFiles(files: File[], progress: (text: string) => voi
     const textureBlobs = new Set(Object.values(textures));
     const image = choose(field('image') || meta?.background ? images : images.filter(value => !textureBlobs.has(value.blob)),
       field('image') || meta?.background, ['image.png', 'background.png']);
+    const shaderAssets = data.rpen ? Object.fromEntries(assets.filter(value => value.group === asset.group &&
+      key(value.name).startsWith(key(dir + 'shader') + '/')).map(value => [value.name.slice(dir.length), value.blob])) : undefined;
+    const scripts: { name: string; source: string }[] = [];
+    const scriptRefs = (data as ChartData & { zepc?: { script?: string[] } }).zepc?.script ?? [];
+    for (const reference of new Set(scriptRefs)) {
+      const ref = normalizePath(reference);
+      const candidates = normal.filter(value => value.group === asset.group);
+      let matches = candidates.filter(value => [key(dir + ref), key(ref)].includes(key(value.name)));
+      if (!matches.length) matches = candidates.filter(value => key(filename(value.name)) === key(filename(ref)));
+      if (matches.length !== 1) throw new Error(`${filename(name)} 无法匹配脚本：${reference}`);
+      scripts.push({ name: matches[0].name, source: (await matches[0].blob.text()).replace(/^\uFEFF/, '') });
+    }
     charts.push({
       id: `local:${crypto.randomUUID()}`, data, music: music.blob, image: image?.blob,
       info: { name: field('name') || meta?.name || filename(name).replace(/\.[^.]+$/i, ''), level: field('level') || meta?.level || '自制谱',
         composer: field('composer') || meta?.composer, charter: field('charter') || meta?.charter,
         illustrator: field('illustrator') || meta?.illustration },
       postfx: parsed.get(assets.find(value => value.group === asset.group && key(value.name) === key(`${dir}postfx.json`))!),
-      textures, fonts, hitsounds,
+      textures, fonts, hitsounds, shaderAssets, scripts: scripts.length ? scripts : undefined,
     });
   }
-  if (!charts.length) throw new Error('未找到谱面；支持 Phigros v1/v3、PEC、RPE，以及 PEZ/ZIP 谱面包');
-  return charts;
+  if (!charts.length && !packed.length) throw new Error('未找到谱面；支持 Phigros v1/v3、PEC、RPE、RPEN、ZEPC 曲包/谱面，以及 PEZ/ZIP 谱面包');
+  return [...charts, ...packed];
 }
 
 function normalizePath(path: string): string {

@@ -1,5 +1,9 @@
 import type { ChartData, ChartInfo } from '../types';
 
+export interface ScriptSource {
+  name: string;
+  source: string;
+}
 export interface LocalChart {
   id: string;
   data: ChartData;
@@ -10,6 +14,9 @@ export interface LocalChart {
   textures?: Record<string, Blob>;
   fonts?: Record<string, Blob>;
   hitsounds?: Record<string, Blob>;
+  shaderAssets?: Record<string, Blob>;
+  scripts?: ScriptSource[];
+  pack?: { name: string; difficulty: string };
 }
 export interface LibraryEntry {
   path: string;
