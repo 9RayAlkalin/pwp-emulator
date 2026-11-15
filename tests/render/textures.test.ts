@@ -3,6 +3,28 @@ import { ChartTextures, grayscaleFilter, textureFrame, textureIsVisible, texture
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('bounds concurrent decoders, deduplicates aliases and waits for in-flight decodes before failure cleanup', async () => {
+  let active = 0, peak = 0;
+  const images: { width: number; height: number; close: ReturnType<typeof vi.fn> }[] = [];
+  vi.stubGlobal('createImageBitmap', async (blob: Blob) => {
+    peak = Math.max(peak, ++active);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    active--;
+    if (await blob.text() === 'bad') throw new Error('decode failed');
+    const image = { width: 1, height: 1, close: vi.fn() }; images.push(image); return image;
+  });
+  const blobs = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`${i}.png`, new Blob([String(i)])]));
+  blobs['alias.png'] = blobs['0.png'];
+  const textures = await ChartTextures.load(blobs);
+  expect(peak).toBeGreaterThan(1); expect(peak).toBeLessThanOrEqual(4);
+  expect(images).toHaveLength(8);
+  textures.dispose(); expect(images.every(image => image.close.mock.calls.length === 1)).toBe(true);
+  images.length = 0;
+  await expect(ChartTextures.load({ ...blobs, 'bad.png': new Blob(['bad']) })).rejects.toThrow('bad.png');
+  expect(active).toBe(0);
+  expect(images.every(image => image.close.mock.calls.length === 1)).toBe(true);
+});
+
 const frames = { duration: .6, frames: [{ image: {} as CanvasImageSource, end: .1 }, { image: {} as CanvasImageSource, end: .6 }] };
 it('selects GIF frames by duration and rewinds deterministically, including negative time', () => {
   expect(textureFrame(frames, 0)).toBe(0);

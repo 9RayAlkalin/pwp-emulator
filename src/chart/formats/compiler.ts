@@ -1,6 +1,7 @@
 import type { ChartEasing, ChartEvent, ChartLine } from '../types';
 import { easingProgress } from '../animation/easing';
-import { eventValue, find_event } from '../animation/timeline';
+import { eventValue, find_event, speedEventIntegral } from '../animation/timeline';
+import { hasExactIntegral } from '../animation/integral';
 
 export const TRACK_START = -1e6;
 export const TRACK_END = 1e9;
@@ -106,6 +107,10 @@ export function combineSpeeds(layers: ChartEvent[][]): ChartEvent[] {
     const a = points[i - 1], b = points[i];
     const active = layers.map(events => events[find_event((a + b) / 2, events)]).filter(Boolean);
     const curved = active.some(e => e.start !== e.end && e.easing && (e.easing.type !== 1 || e.easing.bezier));
+    if (curved && active.every(e => e.start === e.end || hasExactIntegral(e.easing))) {
+      result.push({ startTime: a, endTime: b, speedCurves: active });
+      continue;
+    }
     // Linear speed ramps integrate exactly. Nonlinear ramps use bounded 240 Hz trapezoids.
     const steps = curved ? Math.max(1, Math.min(65536, Math.ceil((b - a) * 240))) : 1;
     for (let j = 0; j < steps; j++) {
@@ -119,10 +124,9 @@ export function combineSpeeds(layers: ChartEvent[][]): ChartEvent[] {
   let floor = 0, origin = 0;
   for (const e of result) {
     if (e.startTime <= 0 && e.endTime > 0) {
-      const dt = -e.startTime;
-      origin = floor + dt * e.value! + (e.endValue! - e.value!) / (e.endTime - e.startTime) * dt * dt / 2;
+      origin = floor + speedEventIntegral(e, 0);
     }
-    floor += (e.endTime - e.startTime) * (e.value! + e.endValue!) / 2;
+    floor += speedEventIntegral(e, e.endTime);
   }
   if (result.length) result[0].floorOrigin = origin;
   return result;

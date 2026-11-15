@@ -110,14 +110,27 @@ export class ChartTextures {
     const result = new ChartTextures();
     const decoded = new Map<Blob, DecodedTexture>();
     try {
-      for (const [name, blob] of Object.entries(blobs)) {
-        try {
-          let texture = decoded.get(blob);
-          if (!texture) { texture = await decodeTexture(blob); decoded.set(blob, texture); }
-          result.textures.set(name, texture);
+      const unique = [...new Set(Object.values(blobs))];
+      let next = 0;
+      // Bound simultaneous GIF decoders and wait for every worker before cleanup
+      // on failure; otherwise a late decode could leak its VideoFrames.
+      const workers = Array.from({ length: Math.min(4, unique.length) }, async () => {
+        while (next < unique.length) {
+          const blob = unique[next++];
+          try { decoded.set(blob, await decodeTexture(blob)); }
+          catch (error) {
+            const name = Object.keys(blobs).find(name => blobs[name] === blob);
+            throw new Error(`判定线纹理 ${name}：${error instanceof Error ? error.message : error}`);
+          }
         }
-        catch (error) { throw new Error(`判定线纹理 ${name}：${error instanceof Error ? error.message : error}`); }
+      });
+      const results = await Promise.allSettled(workers);
+      const failed = results.find(result => result.status === 'rejected');
+      if (failed?.status === 'rejected') {
+        decoded.forEach(texture => texture.dispose());
+        throw failed.reason;
       }
+      for (const [name, blob] of Object.entries(blobs)) result.textures.set(name, decoded.get(blob)!);
       return result;
     } catch (error) { result.dispose(); throw error; }
   }

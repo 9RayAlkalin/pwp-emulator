@@ -8,6 +8,14 @@ vi.mock("../../../src/render/video/encoders/webcodecs", () => ({ createEncoder: 
 const config = (signal: AbortSignal): EncoderConfig => ({ width: 320, height: 180, fps: 30, frames: 3, bitrate: 1000000, signal, status: () => {} });
 
 describe('fixed frame export job', () => {
+  it('awaits asynchronous worker preparation before reading the canvas and honors cancellation', async () => {
+    const abort = new AbortController(), write = vi.fn(), close = vi.fn();
+    factory.mockResolvedValue({ extension: 'webm', write, close });
+    await expect(renderVideo('webcodecs', config(abort.signal), {} as HTMLCanvasElement, async () => {
+      await Promise.resolve(); abort.abort();
+    }, () => {})).rejects.toThrow('已取消');
+    expect(write).not.toHaveBeenCalled(); expect(close).toHaveBeenCalledOnce();
+  });
   it('waits for encoding before advancing its clock or drawing another frame', async () => {
     const events: string[] = [], blob = new Blob(['video']);
     factory.mockResolvedValue({ extension: 'webm', async write(_, index) { await Promise.resolve(); events.push(`write:${index}`); }, async finish() { events.push('finish'); return blob; }, close() { events.push('close'); } } as FrameEncoder);
