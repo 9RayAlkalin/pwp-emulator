@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pwp-emulator.local/schema/zepc-v2.schema.json",
+  "title": "ZEPC v2",
+  "description": "Strict ZEPC v2 bundle/chart schema. Unknown fields are rejected.",
+  "oneOf": [
+    { "$ref": "#/$defs/bundle" },
+    { "$ref": "#/$defs/chart" }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*:).+$"
+    },
+    "color": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "easing": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 29,
+      "default": 1
+    },
+    "assetType": {
+      "enum": ["audio", "image", "texture", "font", "hitsound", "postfx", "script", "chart", "shader"]
+    },
+    "asset": {
+      "type": "object",
+      "required": ["id", "type", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "$ref": "#/$defs/assetType" },
+        "path": { "$ref": "#/$defs/path" },
+        "family": { "type": "string", "minLength": 1 }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "required": ["zepcVersion", "kind", "name", "assets", "difficulties"],
+      "additionalProperties": false,
+      "properties": {
+        "zepcVersion": { "const": 2 },
+        "kind": { "const": "bundle" },
+        "name": { "type": "string", "minLength": 1 },
+        "composer": { "type": "string" },
+        "charter": { "type": "string" },
+        "illustrator": { "type": "string" },
+        "music": { "$ref": "#/$defs/id" },
+        "cover": { "$ref": "#/$defs/id" },
+        "postfx": { "$ref": "#/$defs/id" },
+        "scripts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "assets": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/asset" }
+        },
+        "difficulties": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/difficulty" }
+        }
+      }
+    },
+    "difficulty": {
+      "type": "object",
+      "required": ["id", "name", "level", "chart"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1 },
+        "level": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "number" }
+          ]
+        },
+        "chart": { "$ref": "#/$defs/id" },
+        "music": { "$ref": "#/$defs/id" },
+        "cover": { "$ref": "#/$defs/id" },
+        "postfx": { "$ref": "#/$defs/id" },
+        "scripts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "composer": { "type": "string" },
+        "charter": { "type": "string" },
+        "illustrator": { "type": "string" }
+      }
+    },
+    "chart": {
+      "type": "object",
+      "required": ["zepcVersion", "kind", "id", "timing", "lines"],
+      "additionalProperties": false,
+      "properties": {
+        "zepcVersion": { "const": 2 },
+        "kind": { "const": "chart" },
+        "id": { "$ref": "#/$defs/id" },
+        "timing": { "$ref": "#/$defs/timing" },
+        "offsetSeconds": { "type": "number", "default": 0 },
+        "aspectRatio": { "type": "number", "exclusiveMinimum": 0 },
+        "scripts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/line" }
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": ["bpm"],
+      "additionalProperties": false,
+      "properties": {
+        "bpm": { "type": "number", "exclusiveMinimum": 0 },
+        "tempo": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/tempo" }
+        }
+      }
+    },
+    "tempo": {
+      "type": "object",
+      "required": ["beat", "bpm"],
+      "additionalProperties": false,
+      "properties": {
+        "beat": { "type": "number" },
+        "bpm": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "line": {
+      "type": "object",
+      "required": ["id", "eventLayers", "notes"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "parent": {
+          "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }]
+        },
+        "inheritRotation": { "type": "boolean", "default": false },
+        "layer": { "type": "number", "default": 0 },
+        "clipNotes": { "type": "boolean", "default": true },
+        "timingScale": { "type": "number", "exclusiveMinimum": 0, "default": 1 },
+        "texture": {
+          "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }]
+        },
+        "anchor": { "$ref": "#/$defs/point" },
+        "hudAnchor": {
+          "oneOf": [
+            {
+              "enum": ["pause", "combo", "comboNumber", "score", "progress", "title", "level"]
+            },
+            { "type": "null" }
+          ]
+        },
+        "eventLayers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/eventLayer" }
+        },
+        "notes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/note" }
+        }
+      }
+    },
+    "eventLayer": {
+      "type": "object",
+      "required": ["id", "events"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "events": { "$ref": "#/$defs/lineEvents" }
+      }
+    },
+    "lineEvents": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "positionX": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalarEvent" }
+        },
+        "positionY": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalarEvent" }
+        },
+        "rotation": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalarEvent" }
+        },
+        "opacity": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalarEvent" }
+        },
+        "scrollSpeed": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalarEvent" }
+        },
+        "scaleX": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalarEvent" }
+        },
+        "scaleY": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scalarEvent" }
+        },
+        "color": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/colorEvent" }
+        },
+        "text": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/textEvent" }
+        }
+      }
+    },
+    "scalarEvent": {
+      "type": "object",
+      "required": ["startBeat", "endBeat", "from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "startBeat": { "type": "number" },
+        "endBeat": { "type": "number" },
+        "easing": { "$ref": "#/$defs/easing" },
+        "from": { "type": "number" },
+        "to": { "type": "number" }
+      }
+    },
+    "colorEvent": {
+      "type": "object",
+      "required": ["startBeat", "endBeat", "from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "startBeat": { "type": "number" },
+        "endBeat": { "type": "number" },
+        "easing": { "$ref": "#/$defs/easing" },
+        "from": { "$ref": "#/$defs/color" },
+        "to": { "$ref": "#/$defs/color" }
+      }
+    },
+    "textEvent": {
+      "type": "object",
+      "required": ["startBeat", "endBeat", "from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "startBeat": { "type": "number" },
+        "endBeat": { "type": "number" },
+        "easing": { "$ref": "#/$defs/easing" },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "font": { "$ref": "#/$defs/id" }
+      }
+    },
+    "note": {
+      "type": "object",
+      "required": ["id", "type", "beat", "x"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "enum": ["tap", "drag", "hold", "flick"] },
+        "beat": { "type": "number" },
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "duration": { "type": "number", "exclusiveMinimum": 0 },
+        "speed": { "type": "number", "default": 1 },
+        "width": { "type": "number", "exclusiveMinimum": 0, "default": 1 },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
+        "fake": { "type": "boolean", "default": false },
+        "side": { "enum": ["above", "below"], "default": "above" },
+        "color": { "$ref": "#/$defs/color" },
+        "hitEffectTint": { "$ref": "#/$defs/color" },
+        "hitsound": { "$ref": "#/$defs/id" },
+        "visibleLead": { "type": "number", "minimum": 0 },
+        "highlightMode": { "type": "integer", "minimum": 0, "maximum": 2 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "hold" } }, "required": ["type"] },
+          "then": { "required": ["duration"] }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["tap", "drag", "flick"] } }, "required": ["type"] },
+          "then": { "not": { "required": ["duration"] } }
+        }
+      ]
+    }
+  }
+}

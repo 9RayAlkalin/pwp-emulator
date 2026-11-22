@@ -83,6 +83,7 @@ difficulties:
 | `music` / `image` | 覆盖默认音频/曲绘。 |
 | `postfx` | 覆盖默认后期特效。 |
 | `composer` / `charter` / `illustrator` | 覆盖默认元数据。 |
+| `songName` | 覆盖该难度的实际曲名；`name` 仍表示难度名称。 |
 | `script` | 追加到默认脚本之后。 |
 | `textures` / `fonts` / `hitsounds` | 在默认映射上合并；同名键覆盖。 |
 | `shaders` | 覆盖 shader 目录。 |
@@ -312,6 +313,7 @@ end
 | `on_judge(note, grade, state)` | 音符判定产生结果前调用。返回 `perfect` / `good` / `bad` / `miss` 可覆盖结果；返回其他值则保留原结果。 |
 | `on_hit(note, grade, state)` | 结果确定后调用，包括 Miss。Hold 的头部结果和最终完成可能各触发一次。 |
 | `on_finish(state)` | 播放到达谱面末尾时调用一次。此钩子的暂停/播放/跳转动作会被丢弃。 |
+| `on_action(name, state)` | 点击脚本元素的 `action` 区域时调用，按下即触发；该接触不会同时判定音符。Autoplay 也可操作脚本按钮。 |
 
 `on_judge` 覆盖结果会影响计分、连击、打击特效和 `state`。例如把 `miss` 改为 `good` 会重新计入连击。
 
@@ -329,6 +331,11 @@ end
 | `combo` / `maxCombo` | 当前连击与最大连击。 |
 | `perfect` / `good` / `bad` / `miss` | 各判定数量。 |
 | `total` | 参与判定的音符总数（不含假音符）。 |
+| `width` / `height` | 当前画布像素尺寸，用于脚本的比例布局。 |
+| `autoplay` / `exporting` | 自动演奏（含视频导出）与导出标志。 |
+| `spectrum` | 请求该字段的脚本可读音轨通道 0 的矩形 FFT 平均平方幅度。按 2.5.1 原引擎对每个频点执行 `min(2.5 * 幅度, 1)` 后平方、求均值；依谱面时间求值，可倒退重算。DSP 缓冲时序与原设备仍可能不同。 |
+
+需要固定频谱更新频率的谱面可在 Lua 中加一行 `-- pwp:spectrum-hz=30`。同一谱面的脚本共用首个有效设置（1–240 Hz）；未设置时仍按帧求值。固定频率以谱面 0 秒为起点，两个采样点之间保持上一个值，不改变 Lua 钩子或音轨的采样率。
 
 ### 音符表
 
@@ -359,8 +366,18 @@ end
 | `pwp.clear()` | 清除背景、HUD、判定线和音符覆盖。 |
 | `pwp.pause()` / `pwp.play()` | 请求暂停或继续播放。 |
 | `pwp.seek(seconds)` | 请求跳转到指定秒数。视频导出和曲包加载期间忽略。跳转会重置判定并再次触发 `on_reset`。 |
+| `pwp.display(props)` | 覆盖 HUD 的 `score`（数字）、`combo`（字符串）、`level`（字符串）、`progress`（0–1）。按字段合并，`combo=""` 恢复真实连击。传 `nil` 清除。覆盖不会改写真实统计和结算。 |
+| `pwp.screen(color, alpha)` | 在谱面和 HUD 上方叠加颜色；在脚本元素下方。传 `nil` 清除。 |
+| `pwp.element(id, props)` | 添加/合并画面元素。`x/y/width/height` 为画布归一化坐标，位置表示中心；`rotation` 为顺时针度数。`texture` 引用清单的贴图，`text` 为文本，`size` 为相对画布高度的字号，`color` 为矩形填色，`alpha` 为透明度，`action` 为点击回调名。省略贴图/填色可建立透明点击区。传 `nil` 移除。最多 256 个；按插入顺序绘制，后绘制的按钮优先命中。 |
+| `pwp.volume(gain)` | 音乐相对设置音量的倍率，0–1。 |
+| `pwp.sound(name, gain)` | 播放清单 `hitsounds` 注册的音频，`gain` 默认 1。 |
+| `pwp.loop(name, gain, rate)` | 播放注册音频的循环，倍率默认 1。最多 16 路；音量 0 或 `nil` 停止，暂停/重开/换谱释放音频节点。 |
+| `pwp.chart(name)` | 请求切换到同一 ZEPC 包内唯一命名的难度，重新加载后播放。不接受文件路径或 URL；导出期间忽略。 |
+| `pwp.finish()` | 请求提前结束游玩并进入现有结束/结算流程；导出期间忽略。 |
 
 暂停、播放和跳转不会在 Lua 执行期间立即发生，而是排队到当前钩子结束后由播放器处理，避免重入。
+
+包内切谱等当前帧画完后执行。脚本屏幕层、显示覆盖、元素、循环音效和音量倍率会在重开/跳转时清理。脚本循环音效与实时点击不会录入离线导出音轨，导出也不会重放先前的交互切谱。
 
 ### 沙箱与限制
 
