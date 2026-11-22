@@ -19,7 +19,9 @@ export function renderGameplayFrame(targets: FrameTargets, chartTime: number, mu
     passes.beforeHud?.(foreground, chartTime);
     passes.drawHud(foreground, musicTime);
     passes.drawBlocks(foreground, chartTime);
-    passes.composite(targets.foreground, targets.output, chartTime, split ? targets.background : null);
+    if (targets.foreground !== targets.output) {
+      passes.composite(targets.foreground, targets.output, chartTime, split ? targets.background : null);
+    }
   };
   if (split) {
     const background = passes.drawScene(targets.background.getContext('2d')!, chartTime, 'bg');

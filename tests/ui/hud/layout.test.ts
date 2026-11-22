@@ -40,3 +40,27 @@ it('rejects clicks on covered pause parts in screen space before undoing the att
   expect(hudPointCovered(0, y, gameHudLayout(1600, 900))).toBe(false);
   expect(hudPointCovered(hiddenX, -1, layout)).toBe(false);
 });
+
+it.each([
+  [1600, 900, 0, 1600],
+  [1200, 900, 0, 1200],
+  [2100, 900, 450, 1200],
+  [2100, 900, 0, 2100],
+  [2400, 900, 0, 2400],
+  [4800, 1800, 0, 4800],
+])('fills progress from the HUD left boundary through its moving right edge at %sx%s', (w,h,left,width) => {
+  const layout = gameHudLayout(w,h,{left,width}),bar=layout.progress;
+  for (const progress of [.25,.5,.9,1]) {
+    const imageLeft=bar.left+bar.span*progress-bar.width;
+    const visibleLeft=Math.max(left/layout.scale,imageLeft);
+    const visibleRight=Math.min((left+width)/layout.scale,imageLeft+bar.width);
+    expect(visibleLeft*layout.scale).toBeCloseTo(left);
+    expect(visibleRight*layout.scale).toBeCloseTo(left+width*progress);
+  }
+});
+
+it('preserves the native progress sprite size and top height on standard viewports', () => {
+  for(const [w,h] of [[1600,900],[1200,900],[2100,900],[2400,1800]]) {
+    expect(gameHudLayout(w,h).progress).toMatchObject({width:1919,height:11});
+  }
+});

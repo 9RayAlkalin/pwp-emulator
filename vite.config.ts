@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import { cp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createReadStream } from 'node:fs';
+import { chartPacks } from './server/packs';
 
 async function updateAvatarIndex() {
   const directory = resolve('assets/avatars');
@@ -50,6 +51,7 @@ export default defineConfig({
     name: 'simulator-resources',
     async buildStart() { await updateAvatarIndex(); },
     configureServer(server) {
+      server.middlewares.use(chartPacks(server.config.root, server.config.base));
       server.middlewares.use((request, response, next) => {
         const url = request.url?.split('?')[0];
         if (url === '/isolation-service-worker.js') {
@@ -67,6 +69,9 @@ export default defineConfig({
         if (/[/\\]assets[/\\]avatars[/\\].+\.(png|jpe?g|webp)$/i.test(path)) void updateAvatarIndex();
       };
       server.watcher.on('add', refresh).on('unlink', refresh);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(chartPacks(resolve(server.config.root, server.config.build.outDir), server.config.base));
     },
     async closeBundle() {
       await cp(resolve('node_modules/@ffmpeg/core/dist/esm'), resolve('dist/assets/ffmpeg'), { recursive: true });

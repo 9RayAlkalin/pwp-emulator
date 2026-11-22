@@ -4,7 +4,19 @@ import { type EncoderConfig, type FrameEncoder } from '../types';
 import { browserVideoConfig } from './browser';
 
 async function waitEncoder(encoder: VideoEncoder | AudioEncoder, signal: AbortSignal) {
-  while (encoder.encodeQueueSize > 8) { checkCancelled(signal); await yieldFrame(); }
+  while (encoder.encodeQueueSize > 8) {
+    checkCancelled(signal);
+    await new Promise<void>(resolve => {
+      const wake = () => {
+        encoder.removeEventListener('dequeue', wake);
+        signal.removeEventListener('abort', wake);
+        resolve();
+      };
+      encoder.addEventListener('dequeue', wake, { once: true });
+      signal.addEventListener('abort', wake, { once: true });
+    });
+  }
+  checkCancelled(signal);
 }
 
 /* Opus 编码：20ms 一帧（960 样点）。时间戳从 0 起（与视频同源）。

@@ -209,7 +209,7 @@ export async function importZepcPack(manifestAsset: PackAsset, assets: PackAsset
       music: music.blob,
       image: image?.blob,
       info: {
-        name: manifest.name,
+        name: difficulty.songName ?? manifest.name,
         level: displayLevel,
         music: music.name,
         composer: difficulty.composer,
@@ -225,6 +225,10 @@ export async function importZepcPack(manifestAsset: PackAsset, assets: PackAsset
       pack: { name: manifest.name, difficulty: displayLevel },
     });
   }
+  const names = manifest.difficulties.map(difficulty => difficulty.name);
+  const packCharts = Object.fromEntries(charts.flatMap((chart, index) =>
+    names[index] && names.filter(name => name === names[index]).length === 1 ? [[names[index], chart]] : []));
+  for (const chart of charts) chart.packCharts = packCharts;
   progress(`曲包 ${manifest.name}：${charts.length} 张谱面`);
   return charts;
 }

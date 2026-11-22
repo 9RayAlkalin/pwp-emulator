@@ -26,8 +26,32 @@ describe('native gameplay visuals', () => {
     expect(lateNoteAlpha(note(2), 1.05)).toBeCloseTo(0.5);
     expect(lateNoteAlpha(note(4), 1.11)).toBe(0);
     expect(noteIsVisible(note(1), undefined, 1.1, false)).toBe(true);
-    expect(noteIsVisible(note(3), { grade: 'miss' }, 2.24, false)).toBe(true);
-    expect(noteIsVisible(note(3), { grade: 'miss' }, 2.26, false)).toBe(false);
+  });
+  it.each([
+    ['autoplay/export', undefined, true],
+    ['autoplay/export with a prior manual miss', { grade: 'miss' }, true],
+    ['manual Perfect', { grade: 'perfect' }, false],
+    ['manual Good', { grade: 'good' }, false],
+  ] as const)('removes the Hold at the true tail in %s', (_mode, result, autoplay) => {
+    const hold = note(3);
+    expect(noteIsVisible(hold, result, 1.999, autoplay)).toBe(true);
+    expect(noteIsVisible(hold, result, 2, autoplay)).toBe(false);
+    expect(noteIsVisible(hold, result, 2.24, autoplay)).toBe(false);
+  });
+  it('removes a fake Hold at the true tail', () => {
+    const hold = { ...note(3), isFake: true };
+    expect(noteIsVisible(hold, undefined, 1.999, true)).toBe(true);
+    expect(noteIsVisible(hold, undefined, 2, true)).toBe(false);
+  });
+  it('keeps a missed Hold dimmed until the true tail, with no post-tail delay', () => {
+    const hold = note(3), judge = new Judge(); judge.reset([hold]);
+    judge.update(1.2);
+    judge.update(1.999);
+    const result = judge.results.get(hold);
+    expect(result).toMatchObject({ grade: 'miss', visualMissed: true });
+    expect(noteIsVisible(hold, result, 1.999, false)).toBe(true);
+    expect(noteIsVisible(hold, result, 2, false)).toBe(false);
+    expect(noteIsVisible(hold, result, 2.24, false)).toBe(false);
   });
   it('uses the original Bad alpha curve rather than inventing position/scale animation', () => {
     expect(badNoteAlpha(0)).toBe(1);

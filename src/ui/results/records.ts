@@ -26,14 +26,22 @@ export function resultRecordKey(key: string): string {
   }
 }
 
-export function recordResult(key: string, score: number): number {
+export function resultBestText(score: number, previous: number, autoplay: boolean): string {
+  if (!autoplay && score <= previous) return '';
+  const title = autoplay ? 'AUTOPLAY' : 'NEW BEST';
+  const delta = score - previous;
+  const sign = delta < 0 ? '-' : '+';
+  return title + '   ' + String(previous).padStart(7, '0') + '  ' + sign + String(Math.abs(delta)).padStart(7, '0');
+}
+
+export function recordResult(key: string, score: number, save = true): number {
   try {
     const records = JSON.parse(localStorage.getItem('pwp.records') || '{}');
     const canonical = resultRecordKey(key);
     const previousValue = records[canonical] ?? Object.entries(records)
       .find(([storedKey]) => resultRecordKey(storedKey) === canonical)?.[1];
     const previous = Number.isInteger(previousValue) && previousValue >= 0 && previousValue <= 1000000 ? previousValue : 0;
-    if (score > previous) {
+    if (save && score > previous) {
       records[canonical] = score;
       localStorage.setItem('pwp.records', JSON.stringify(records));
     }

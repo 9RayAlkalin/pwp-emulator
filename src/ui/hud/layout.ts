@@ -10,6 +10,7 @@ export function gameHudLayout(w: number, h: number, bounds?: Pick<ChartViewport,
   const half_width = bounds ? bounds.width / scale / 2 : w / h >= defaultChartAspect ? 888.888916015625 : width / 2;
   const left = bounds ? bounds.left / scale : width / 2 - half_width;
   const right = bounds ? (bounds.left + bounds.width) / scale : width / 2 + half_width;
+  const progressSpan = right - left;
   return { scale, width, height, half_width, left, right,
     pause: { x: left + 50.589 - 34.262 / 2, y: 55.7 - 37.966 / 2, width: 34.262, height: 37.966 },
     score: { x: right - 37.39, y: 54.3 },
@@ -18,7 +19,9 @@ export function gameHudLayout(w: number, h: number, bounds?: Pick<ChartViewport,
     song: { x: left + 40, y: height - 49.8 },
     level: { x: right - 40, y: height - 49.8 },
     cover: { left: bounds ? left : width / 2 - 888.8889, right: bounds ? right : width / 2 + 888.8889, width: 1000 },
-    progress: { left, span: 2 * half_width, width: 1919, height: 11 } };
+    // The original sprite covers the native 16:9 range. Wider adapted charts
+    // need enough image behind the moving right edge to keep the left filled.
+    progress: { left, span: progressSpan, width: Math.max(1919, progressSpan), height: 11 } };
 }
 
 export interface HudAttachment { dx: number; dy: number; rotation: number; scaleX: number; scaleY: number; alpha: number; color?: string; }

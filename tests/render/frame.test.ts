@@ -32,6 +32,15 @@ it('does not continue to HUD or compositing after a scene drawing error',()=>{
   expect(hud).not.toHaveBeenCalled();expect(blocks).not.toHaveBeenCalled();expect(composite).not.toHaveBeenCalled();
 });
 
+it('draws the scene and HUD on the export canvas without a final copy', () => {
+  const drawScene = vi.fn(), drawHud = vi.fn(), drawBlocks = vi.fn(), composite = vi.fn();
+  renderGameplayFrame({ ...targets, foreground: targets.output }, 1, 2, false, { drawScene, drawHud, drawBlocks, composite });
+  expect(drawScene).toHaveBeenCalledWith({ name: 'output' }, 1);
+  expect(drawHud).toHaveBeenCalledWith({ name: 'output' }, 2);
+  expect(drawBlocks).toHaveBeenCalledWith({ name: 'output' }, 1);
+  expect(composite).not.toHaveBeenCalled();
+});
+
 it('places RPEN local effects before HUD and keeps the final noise/global stages after it',()=>{
   const calls:string[]=[];
   renderGameplayFrame(targets,2,3,false,{drawScene:()=>{calls.push('scene');},beforeHud:()=>{calls.push('local');},

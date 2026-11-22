@@ -1,7 +1,7 @@
 import type { ChartInfo } from '../../chart/types';
 import type { Settings } from '../../app/settings';
 import type { Statistics } from '../../gameplay/types';
-import { resultGrade } from '../results/records';
+import { resultBestText, resultGrade } from '../results/records';
 import { efficientBlur, shadowBlurConfig, translucentTint } from '../../render/blur';
 import { avatarId, parseTips, type AvatarEntry } from '../profile';
 import { fakeSyncFrame, type SyncFrame } from '../results/sync';
@@ -33,10 +33,21 @@ interface Export { scenes: Record<string, SceneData>; clips: Record<string, Clip
 export interface SceneView {
   info: ChartInfo; image?: CanvasImageSource; background?: CanvasImageSource; frame?: CanvasImageSource;
   settings: Settings; stats: Statistics & { early?: number; late?: number }; elapsed: number;
-  collection?: boolean; previousBest?: number; resume?: boolean; showName?: boolean;
+  collection?: boolean; previousBest?: number; autoplay?: boolean; resume?: boolean; showName?: boolean;
   fadeTime?: number;
   loadingTime?: number;
   tip?: string;
+}
+
+export function sceneDifficulty(label: string): { name: string; rating: string } {
+  const text = label.trim();
+  const parts = /^([a-z]+)\s*Lv\.\s*(\S+)$/i.exec(text)
+    ?? /^([a-z]+)\s+(\S+)$/i.exec(text)
+    ?? /^(EZ|HD|IN|AT|SP)(\d+(?:\.\d+)?)$/.exec(text);
+  if (!parts) return { name: /^(EZ|HD|IN|AT|SP)$/.test(text) ? text : 'IN', rating: '0' };
+  const [, name, value] = parts;
+  const rating = /^\d+(?:\.\d+)?$/.test(value) ? String(Math.floor(Number(value))) : value;
+  return { name, rating };
 }
 
 // Unity's unweighted AnimationCurve segments are cubic Hermite, including step tangents.
@@ -219,13 +230,13 @@ export class Scene {
     if (name === 'result') {
       const bindings = scene.bindings.LevelOverControl;
       const set = (key: string, value: any) => { if (bindings[key]?.fileID) texts.set(bindings[key].fileID, String(value)); };
-      const level = view.info.level.match(/^(EZ|HD|IN|AT|SP)\s*(?:Lv\.)?\s*([\d.]+)/);
+      const level = sceneDifficulty(view.info.level);
       set('scoreText', String(Math.round(view.stats.score)).padStart(7, '0'));
       set('percentText', view.stats.accuracy.toFixed(2).padStart(5, '0') + '%');
       set('maxComboText', view.stats.maxCombo);
       for (const stat of ['perfect', 'good', 'bad', 'miss', 'early', 'late'] as const) set(stat + 'Text', view.stats[stat] || 0);
-      set('songsName', view.info.name); set('songsLevel', ''); set('songsDifficulty', (level?.[1] || 'IN') + '  Lv.' + Math.floor(Number(level?.[2] || 0)));
-      set('best', view.stats.score > (view.previousBest || 0) ? `NEW BEST   ${String(view.previousBest || 0).padStart(7, '0')}  +${String(view.stats.score - (view.previousBest || 0)).padStart(7, '0')}` : '');
+      set('songsName', view.info.name); set('songsLevel', ''); set('songsDifficulty', level.name + '  Lv.' + level.rating);
+      set('best', resultBestText(view.stats.score, view.previousBest ?? 0, !!view.autoplay));
       set('collectedText', '已获得');
       const grade = resultGrade(view.stats);
       for (const node of Object.values(scene.nodes)) {
@@ -293,9 +304,9 @@ export class Scene {
       texts.set(scene.nodes['59'].components.find(c => c.font)!.id, view.info.charter || '');
       texts.set(scene.nodes['163'].components.find(c => c.font)!.id, view.info.illustrator || '');
       texts.set(scene.nodes['72'].components.find(c => c.font)!.id, 'Tip: ' + (view.tip ?? this.activeTip));
-      const difficulty = view.info.level.match(/^(EZ|HD|IN|AT|SP).*?(\d+(?:\.\d+)?)/);
-      texts.set(scene.nodes['47'].components.find(c => c.font)!.id, String(Math.floor(Number(difficulty?.[2] || 0))));
-      texts.set(scene.nodes['112'].components.find(c => c.font)!.id, difficulty?.[1] || 'IN');
+      const difficulty = sceneDifficulty(view.info.level);
+      texts.set(scene.nodes['47'].components.find(c => c.font)!.id, difficulty.rating);
+      texts.set(scene.nodes['112'].components.find(c => c.font)!.id, difficulty.name);
       if (view.image) { dynamicImages.set('157', view.image); dynamicImages.set('11', view.image); }
       for (const [id, values] of this.animate(scene, 'Loading', 'Canvas (1)/StartInfos/StartAnimation/moreInfos/content/loading', (view.loadingTime ?? time) % this.duration('Loading'))) patch(id, values);
       this.canvas(ctx, scene, '154', patches, texts, dynamicImages, hidden, enabled, view, canvasWidth / canvasHeight < 16 / 9 ? 0 : .6);

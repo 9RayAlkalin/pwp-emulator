@@ -49,6 +49,20 @@ export interface ScriptState {
   bad: number;
   miss: number;
   total: number;
+  width?: number;
+  height?: number;
+  spectrum?: number;
+  autoplay?: boolean;
+  exporting?: boolean;
+}
+
+export interface ScriptElement {
+  x: number; y: number; width: number; height: number;
+  texture?: string; text?: string; action?: string;
+  color?: ScriptColor; alpha: number; rotation: number; size: number;
+}
+export interface ScriptDisplay {
+  score?: number; combo?: string; level?: string; progress?: number;
 }
 
 export interface ScriptLineStyle {
@@ -77,8 +91,14 @@ export interface ScriptOverlay {
   lines: Map<number, ScriptLineStyle>;
   notes: Map<string, ScriptNoteStyle>;
   hud?: ScriptHud;
+  screen?: { color: ScriptColor; alpha: number };
+  display: ScriptDisplay;
+  elements: Map<string, ScriptElement>;
+  musicVolume: number;
+  loops: Map<string, { volume: number; rate: number }>;
 }
-export type ScriptAction = { type: 'pause' } | { type: 'play' } | { type: 'seek'; time: number };
+export type ScriptAction = { type: 'pause' } | { type: 'play' } | { type: 'seek'; time: number }
+  | { type: 'chart'; name: string } | { type: 'finish' } | { type: 'sound'; name: string; volume: number };
 
 export interface ScriptHost {
   readonly overlay: ScriptOverlay;
@@ -91,6 +111,8 @@ export interface ScriptHost {
   judge(note: ScriptNote, grade: ScriptGrade, state: ScriptState): ScriptGrade;
   hit(note: ScriptNote, grade: ScriptGrade, state: ScriptState): void;
   finish(state: ScriptState): void;
+  action(name: string, state: ScriptState): void;
+  pointer(x: number, y: number, state: ScriptState): boolean;
   takeActions(): ScriptAction[];
   dispose(): void;
 }
@@ -127,7 +149,14 @@ function readColor(value: unknown): ScriptColor | undefined {
 }
 
 function emptyOverlay(): ScriptOverlay {
-  return { lines: new Map(), notes: new Map() };
+  return { lines: new Map(), notes: new Map(), elements: new Map(), display: {}, musicVolume: 1, loops: new Map() };
+}
+
+function clearOverlay(overlay: ScriptOverlay): void {
+  overlay.lines.clear(); overlay.notes.clear(); overlay.elements.clear();
+  overlay.hud = undefined; overlay.background = undefined; overlay.screen = undefined;
+  overlay.display = {}; overlay.musicVolume = 1;
+  overlay.loops.clear();
 }
 
 function readValue(L: any, index: number, depth = 0): unknown {
@@ -300,8 +329,64 @@ export function createScriptHost(scripts: readonly ScriptSource[]): ScriptHost {
       });
       api('clear_hud', () => { overlay.hud = undefined; return 0; });
       api('clear', () => {
-        overlay.background = undefined; overlay.hud = undefined;
-        overlay.lines.clear(); overlay.notes.clear();
+        clearOverlay(overlay);
+        return 0;
+      });
+      api('display', (L: any) => {
+        const props = readValue(L, 1);
+        if (!isObject(props)) { overlay.display = {}; return 0; }
+        const display = { ...overlay.display };
+        if (typeof props.score === 'number' && Number.isFinite(props.score)) display.score = clamp(props.score, 0, 1e9);
+        if (typeof props.combo === 'string') display.combo = props.combo.slice(0, 128);
+        if (typeof props.level === 'string') display.level = props.level.slice(0, 128);
+        if (typeof props.progress === 'number' && Number.isFinite(props.progress)) display.progress = clamp(props.progress, 0, 1);
+        overlay.display = display;
+        return 0;
+      });
+      api('screen', (L: any) => {
+        const color = readColor(readValue(L, 1));
+        overlay.screen = color ? { color, alpha: clamp(finite(readValue(L, 2), 1), 0, 1) } : undefined;
+        return 0;
+      });
+      api('volume', (L: any) => { overlay.musicVolume = clamp(finite(readValue(L, 1), 1), 0, 1); return 0; });
+      api('loop', (L: any) => {
+        const name = lua.lua_tojsstring(L, 1);
+        if (name === null || name.length > 256) return 0;
+        if (lua.lua_isnoneornil(L, 2)) { overlay.loops.delete(name); return 0; }
+        if (overlay.loops.size < 16 || overlay.loops.has(name)) overlay.loops.set(name, {
+          volume: clamp(finite(readValue(L, 2), 0), 0, 1), rate: clamp(finite(readValue(L, 3), 1), .1, 4),
+        });
+        return 0;
+      });
+      api('element', (L: any) => {
+        const id = lua.lua_tojsstring(L, 1);
+        if (id === null || id.length > 128) return 0;
+        const props = readValue(L, 2);
+        if (!isObject(props)) { overlay.elements.delete(id); return 0; }
+        if (!overlay.elements.has(id) && overlay.elements.size >= 256) return 0;
+        const old = overlay.elements.get(id);
+        const value = (key: keyof ScriptElement, fallback: number, min: number, max: number) =>
+          clamp(finite(props[key], finite(old?.[key], fallback)), min, max);
+        const string = (key: 'texture' | 'text' | 'action', max: number) =>
+          typeof props[key] === 'string' ? (props[key] as string).slice(0, max) : old?.[key];
+        overlay.elements.set(id, {
+          x: value('x', .5, -10, 10), y: value('y', .5, -10, 10),
+          width: value('width', .1, 0, 10), height: value('height', .1, 0, 10),
+          size: value('size', .03, .005, 1), rotation: value('rotation', 0, -36000, 36000),
+          alpha: value('alpha', 1, 0, 1), color: readColor(props.color) ?? old?.color,
+          texture: string('texture', 256), text: string('text', 512), action: string('action', 128),
+        });
+        return 0;
+      });
+      api('chart', (L: any) => {
+        const name = lua.lua_tojsstring(L, 1);
+        if (name !== null && name.length <= 128) actions.push({ type: 'chart', name });
+        return 0;
+      });
+      api('finish', () => { actions.push({ type: 'finish' }); return 0; });
+      api('sound', (L: any) => {
+        const name = lua.lua_tojsstring(L, 1);
+        if (name !== null && name.length <= 256) actions.push({ type: 'sound', name, volume: clamp(finite(readValue(L, 2), 1), 0, 1) });
         return 0;
       });
       api('pause', () => { actions.push({ type: 'pause' }); return 0; });
@@ -396,8 +481,9 @@ export function createScriptHost(scripts: readonly ScriptSource[]): ScriptHost {
       // reset. Keep overlays created by on_load for that first reset; later
       // restarts and seeks must not inherit stale HUD or note styles.
       if (resets++ > 0) {
-        overlay.lines.clear(); overlay.notes.clear(); overlay.hud = undefined; overlay.background = undefined;
+        clearOverlay(overlay);
       }
+      actions.length = 0;
       finished = false;
       call('on_reset', stateArgs(state), 0, BUDGET.reset);
     },
@@ -425,11 +511,29 @@ export function createScriptHost(scripts: readonly ScriptSource[]): ScriptHost {
       finished = true;
       call('on_finish', stateArgs(state), 0, BUDGET.finish);
     },
+    action(name, state) {
+      if (finished) return;
+      call('on_action', (L: any) => { pushValue(L, name); pushValue(L, { ...state }); return 2; }, 0, BUDGET.judge);
+    },
+    pointer(x, y, state) {
+      if (finished || !Number.isFinite(x) || !Number.isFinite(y)) return false;
+      for (const element of [...overlay.elements.values()].reverse()) {
+        if (!element.action || element.alpha <= 0) continue;
+        const angle = -element.rotation * Math.PI / 180;
+        const dx = (x - element.x) * (state.width ?? 1), dy = (y - element.y) * (state.height ?? 1);
+        const localX = dx * Math.cos(angle) - dy * Math.sin(angle);
+        const localY = dx * Math.sin(angle) + dy * Math.cos(angle);
+        if (Math.abs(localX) > element.width * (state.width ?? 1) / 2 || Math.abs(localY) > element.height * (state.height ?? 1) / 2) continue;
+        this.action(element.action, state);
+        return true;
+      }
+      return false;
+    },
     takeActions() { return actions.splice(0); },
     dispose() {
       disposed = true;
-      overlay.background = undefined; overlay.hud = undefined;
-      overlay.lines.clear(); overlay.notes.clear();
+      actions.length = 0;
+      clearOverlay(overlay);
       if (L) { try { lua.lua_close(L); } catch { /* already closed */ } }
     },
   };

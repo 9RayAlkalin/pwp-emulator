@@ -2,6 +2,7 @@ import { simulator } from './player/runtime';
 import { bindInput } from './player/input';
 import { importFiles } from './chart/import/importer';
 import { loadSettings, saveSettings } from './app/settings';
+import { downloadPack } from './app/download';
 import type { ChartInfo } from './chart/types';
 import type { LibraryEntry, LocalChart } from './chart/import/types';
 import type { Settings } from './app/settings';
@@ -11,6 +12,7 @@ const asset = (path: string) => new URL(path.replace(/^\/+/, ''), new URL(import
 let settings = loadSettings();
 let entries: LibraryEntry[] = [];
 const localCharts = new Map<string, LocalChart>();
+const bundledPacks = new Map<string, Promise<LocalChart[]>>();
 let busy = false;
 let ready = false;
 
@@ -68,7 +70,22 @@ async function loadSelected(): Promise<void> {
   $('player').hidden = false;
   simulator.pause();
   try {
-    const local = localCharts.get(entry.path);
+    let local = localCharts.get(entry.path);
+    if (!local && entry.packFile) {
+      const file = entry.packFile;
+      let imported = bundledPacks.get(file);
+      if (!imported) {
+        imported = (async () => {
+          const pack = await downloadPack(asset(file), file.split('/').pop()!, status);
+          return importFiles([pack], status);
+        })();
+        bundledPacks.set(file, imported);
+        imported.catch(() => bundledPacks.delete(file));
+      }
+      local = (await imported)[entry.packChart ?? 0];
+      if (!local) throw new Error('曲包谱面索引无效');
+      localCharts.set(entry.path, local);
+    }
     if (local) await simulator.loadLocal(local);
     else await simulator.load(entry);
     const info: ChartInfo = simulator.snapshot().info;
@@ -175,6 +192,13 @@ async function boot(): Promise<void> {
     if (response.ok && response.headers.get('content-type')?.includes('json')) library = await response.json();
   } catch { /* The bundled sample remains available without a generated library. */ }
   entries = library.charts || [];
+  try {
+    const response = await fetch(asset('assets/builtin/april251/index.json'));
+    if (response.ok && response.headers.get('content-type')?.includes('json')) {
+      const packLibrary: { charts?: LibraryEntry[] } = await response.json();
+      entries.unshift(...packLibrary.charts ?? []);
+    }
+  } catch { /* Optional APK-derived packs are generated locally. */ }
   entries.unshift({
     path: '/assets/library/AboutTheUniverse.SOTUIMIssionary/IN',
     asset: '/assets/library/AboutTheUniverse.SOTUIMIssionary',

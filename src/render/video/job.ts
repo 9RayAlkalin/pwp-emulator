@@ -12,13 +12,18 @@ export async function renderVideo(
     checkCancelled(config.signal);
     encoder = await module.createEncoder(config);
     config.status('渲染视频…');
+    let yieldedAt = performance.now();
     for (let index = 0; index < config.frames; index++) {
       checkCancelled(config.signal);
       await render(index / config.fps);
       checkCancelled(config.signal);
       await encoder.write(canvas, index);
       progress(index + 1);
-      await yieldFrame();
+      checkCancelled(config.signal);
+      if (performance.now() - yieldedAt >= 8) {
+        await yieldFrame();
+        yieldedAt = performance.now();
+      }
     }
     checkCancelled(config.signal);
     config.status('封装中…');

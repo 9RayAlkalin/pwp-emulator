@@ -1,13 +1,20 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { unityKeyValue } from '../../../src/ui/scenes/scene';
-import { resultGrade, resultRecordKey } from '../../../src/ui/results/records';
+import { sceneDifficulty, unityKeyValue } from '../../../src/ui/scenes/scene';
+import { recordResult, resultBestText, resultGrade, resultRecordKey } from '../../../src/ui/results/records';
 import { shadowBlurConfig } from '../../../src/render/blur';
 import type { Statistics } from '../../../src/gameplay/types';
 
 const data = JSON.parse(readFileSync(new URL('../../../assets/ui/scenes.json', import.meta.url), 'utf8'));
 
 describe('original Unity scene data', () => {
+  it('preserves textual difficulty labels and truncates only numeric ratings', () => {
+    expect(sceneDifficulty('lN  Lv.I2')).toEqual({ name: 'lN', rating: 'I2' });
+    expect(sceneDifficulty('SP Lv.?')).toEqual({ name: 'SP', rating: '?' });
+    expect(sceneDifficulty('IN 15.3')).toEqual({ name: 'IN', rating: '15' });
+    expect(sceneDifficulty('HD Lv.8')).toEqual({ name: 'HD', rating: '8' });
+    expect(sceneDifficulty('')).toEqual({ name: 'IN', rating: '0' });
+  });
   it('retains the result hierarchy and its actual 3.5 second entrance clip', () => {
     expect(data.clips.LevelOvarAnimation.duration).toBe(3.5);
     expect(data.clips.LevelOver.duration).toBeCloseTo(2 / 3, 5);
@@ -53,5 +60,23 @@ describe('original Unity scene data', () => {
     expect(resultRecordKey('/assets/library/song/IN/')).toBe('/assets/library/song/IN');
     expect(resultRecordKey('/res/library/song/IN')).toBe('/assets/library/song/IN');
     expect(resultRecordKey('http://127.0.0.1:5173/res/s6')).toBe('/assets/builtin/s6');
+  });
+
+  it('always shows the autoplay banner and retains the previous best and score difference', () => {
+    expect(resultBestText(0, 0, true)).toBe('AUTOPLAY   0000000  +0000000');
+    expect(resultBestText(900000, 950000, true)).toBe('AUTOPLAY   0950000  -0050000');
+    expect(resultBestText(900000, 950000, false)).toBe('');
+    expect(resultBestText(950000, 900000, false)).toBe('NEW BEST   0900000  +0050000');
+  });
+
+  it('reads an existing best without writing autoplay scores', () => {
+    const setItem = vi.fn();
+    vi.stubGlobal('localStorage', { getItem: () => '{"song":950000}', setItem });
+    try {
+      expect(recordResult('song', 1000000, false)).toBe(950000);
+      expect(setItem).not.toHaveBeenCalled();
+      expect(recordResult('song', 1000000)).toBe(950000);
+      expect(setItem).toHaveBeenCalledWith('pwp.records', '{"song":1000000}');
+    } finally { vi.unstubAllGlobals(); }
   });
 });

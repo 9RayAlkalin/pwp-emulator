@@ -6,7 +6,11 @@ import { type EncoderConfig, type FrameEncoder } from '../types';
 
 // Bound uncompressed input instead of retaining every image in the Wasm filesystem.
 export function ffmpegBatchFrames(width: number, height: number, fps: number): number {
-  return Math.max(1, Math.min(fps * 2, Math.floor(32 * 1024 * 1024 / (width * height * 4))));
+  const frameBytes = width * height * 4, mib = 1024 * 1024;
+  // A 4K frame alone is ~32 MiB. Allow up to four large frames per run
+  // so we do not restart the codec and force a keyframe on every frame.
+  const budget = frameBytes > 16 * mib ? Math.min(128 * mib, 4 * frameBytes) : 32 * mib;
+  return Math.max(1, Math.min(fps * 2, Math.floor(budget / frameBytes)));
 }
 
 export async function createEncoder(config: EncoderConfig): Promise<FrameEncoder> {
@@ -20,31 +24,52 @@ export async function createEncoder(config: EncoderConfig): Promise<FrameEncoder
   const { width, height, fps, signal } = config;
   try {
     const capacity = ffmpegBatchFrames(width, height, fps), frameBytes = width * height * 4;
-    let batch = new Uint8Array(capacity * frameBytes), buffered = 0, written = 0;
+    let batch = new Uint8Array(0), buffered = 0, written = 0;
     const parts: { name: string; frames: number }[] = [];
-    const flush = async () => {
+    let pending: Promise<void> | undefined;
+    let failure: { error: unknown } | undefined;
+    const check = () => {
+      checkCancelled(signal);
+      if (failure) throw failure.error;
+    };
+    const drain = async () => {
+      await pending;
+      pending = undefined;
+      check();
+    };
+    const submit = async () => {
       if (!buffered) return;
+      // Keep one batch in FFmpeg and at most one in the renderer. Only the
+      // active batch owns the worker's input file.
+      await drain();
       const count = buffered, name = `part-${String(parts.length).padStart(6, '0')}.${options.container}`;
+      const input = count * frameBytes === batch.length ? batch : batch.subarray(0, count * frameBytes);
+      buffered = 0;
+      batch = new Uint8Array(0);
       config.status(`FFmpeg 编码 ${written - count + 1}–${written} 帧…`);
-      // writeFile transfers its buffer to the worker; make a fresh bounded batch afterwards.
-      await ffmpeg.writeFile('frames.rgba', buffered === capacity ? batch : batch.slice(0, buffered * frameBytes));
-      await execute(['-f', 'rawvideo', '-pixel_format', 'rgba', '-video_size', `${width}x${height}`, '-framerate', String(fps), '-i', 'frames.rgba',
-        '-an', '-frames:v', String(count), ...videoArguments(options, fps, config.bitrate), name]);
-      await ffmpeg.deleteFile('frames.rgba');
-      parts.push({ name, frames: count }); buffered = 0; batch = new Uint8Array(capacity * frameBytes);
-      config.status('渲染视频…');
+      pending = (async () => {
+        await ffmpeg.writeFile('frames.rgba', input);
+        await execute(['-f', 'rawvideo', '-pixel_format', 'rgba', '-video_size', `${width}x${height}`, '-framerate', String(fps), '-i', 'frames.rgba',
+          '-an', '-frames:v', String(count), ...videoArguments(options, fps, config.bitrate), name]);
+        await ffmpeg.deleteFile('frames.rgba');
+        parts.push({ name, frames: count });
+      })().catch(error => { failure = { error }; });
     };
     return {
       extension: options.container,
       async write(canvas, index) {
-        checkCancelled(signal);
+        check();
         if (index !== written) throw new Error('FFmpeg 帧顺序不连续');
+        if (index >= config.frames) throw new Error('FFmpeg 帧数超出导出范围');
+        if (!batch.length && capacity > 1) batch = new Uint8Array(Math.min(capacity, config.frames - written) * frameBytes);
         const pixels = canvas.getContext('2d')!.getImageData(0, 0, width, height).data;
-        batch.set(pixels, buffered * frameBytes); buffered++; written++;
-        if (buffered === capacity) await flush();
+        if (capacity === 1) batch = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
+        else batch.set(pixels, buffered * frameBytes);
+        buffered++; written++;
+        if (buffered === capacity) await submit();
       },
       async finish() {
-        await flush(); checkCancelled(signal); batch = new Uint8Array(0);
+        await submit(); await drain();
         config.status('FFmpeg 合并视频和音轨…');
         const list = 'ffconcat version 1.0\n' + parts.map(part => `file '${part.name}'\nduration ${part.frames / fps}\n`).join('');
         await ffmpeg.writeFile('parts.txt', new TextEncoder().encode(list));

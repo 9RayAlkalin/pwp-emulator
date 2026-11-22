@@ -28,6 +28,7 @@ function pathMap(value: unknown, label: string): Record<string, string> {
 
 export interface ZepcDifficulty {
   name: string;
+  songName?: string;
   level: string;
   chart: string;
   music?: string;
@@ -87,6 +88,7 @@ export function parseZepcManifest(value: unknown): ZepcManifest {
     const level = optionalText(entry.level ?? entry.rating, `ZEPC 难度 ${index + 1} level`) ?? '';
     return {
       name: difficultyName,
+      songName: optionalText(entry.songName, `ZEPC 难度 ${index + 1} songName`),
       level,
       chart,
       music: optionalText(entry.music ?? entry.song ?? entry.audio, `ZEPC 难度 ${index + 1} music`) ?? defaults.music,

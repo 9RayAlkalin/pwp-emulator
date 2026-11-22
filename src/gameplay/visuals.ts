@@ -29,11 +29,8 @@ export function badNoteAlpha(elapsed: number): number {
 export function noteIsVisible(note: RuntimeNote, result: { grade: Grade; holding?: boolean } | undefined,
                               time: number, autoplay: boolean): boolean {
   if (time < note.sect - (note.visibleTime ?? Infinity)) return false;
-  // PEC/RPE use their true tail as the visual lifetime. The native missed-Hold
-  // object's extra .25 s lifetime otherwise pins a zero-length tail on the line.
-  if (note.is_hold && note.master.animation && time >= note.hold_end_time) return false;
-  if (note.isFake) return time <= (note.is_hold ? note.hold_end_time : note.sect);
-  if (note.is_hold) return time <= note.hold_end_time + 0.25;
+  if (note.is_hold) return time < note.hold_end_time;
+  if (note.isFake) return time <= note.sect;
   if (!autoplay && result) return false;
   return autoplay ? time <= note.sect : time <= note.sect + (note.type === 1 ? 0.18 : note.type === 2 ? 0.1 : 0.14);
 }

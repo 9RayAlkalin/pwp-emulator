@@ -17,6 +17,7 @@ export interface LocalChart {
   shaderAssets?: Record<string, Blob>;
   scripts?: ScriptSource[];
   pack?: { name: string; difficulty: string };
+  packCharts?: Record<string, LocalChart>;
 }
 export interface LibraryEntry {
   path: string;
@@ -29,4 +30,6 @@ export interface LibraryEntry {
   charter?: string;
   song?: string;
   anomaly?: string;
+  packFile?: string;
+  packChart?: number;
 }

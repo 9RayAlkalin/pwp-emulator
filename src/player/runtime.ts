@@ -4,18 +4,23 @@ import type { RuntimeNote } from '../gameplay/types';
 import type { Settings } from '../app/settings';
 import { Judge } from '../gameplay/judge';
 import { HudTextRenderer } from '../ui/hud/text';
+import { drawGameplayWatermark } from '../ui/hud/watermark';
 import { activeHitEffects, autoplayHoldTimes, createHitEffect } from '../gameplay/hits';
 import { HitEffectRenderer } from '../render/hits';
 import { badNoteAlpha, gameplayMetrics, judgeLineColor, lateNoteAlpha, noteIsVisible, noteViewportScale, orderedNotes } from '../gameplay/visuals';
 import { phigrosEase } from '../chart/formats/phi';
 import { block_transform, block_state, blockingBlockAt, BlockTouchFeedback } from '../gameplay/blocks';
 import { MusicLowPass } from '../audio/filter';
+import { Spectrum, spectrumCadence } from '../audio/spectrum';
+import { drawScriptOverlay } from '../render/script';
 import { Scene, type SceneView } from '../ui/scenes/scene';
 import { entrancePhase, loadingDisplaySeconds, gameplayOpeningSeconds, gameplayEndingSeconds } from '../ui/scenes/transitions';
 import { recordResult } from '../ui/results/records';
+import { bindExportSettings } from '../ui/video/settings';
 import { exportFrame, exportTimeline, type ExportScenes, type ExportTimeline } from '../render/video/timeline';
 import { resultMusicFile, resultMusicFiles } from '../ui/results/music';
 import { renderVideo } from '../render/video/job';
+import { RenderQueue } from '../render/video/queue';
 import { renderAudio } from '../render/video/audio';
 import { checkCancelled } from '../render/video/control';
 import { type ExportBackend } from '../render/video/types';
@@ -123,6 +128,7 @@ const C: any = {
     loadingTip: '',
     resultImage: null,
     resultStats: null,
+    resultAutoplay: false,
     resultCollection: false,
     resultStarted: 0,
     gameOverAt: 0,
@@ -136,6 +142,17 @@ const actx = new AudioContext();
 let settings: Settings;
 const judge = new Judge();
 let chartScript: ScriptHost | null = null;
+let scriptSpectrum: Spectrum | undefined;
+let scriptLoadingLevel: string | undefined;
+let scriptPackCharts: Record<string, LocalChart> | undefined;
+let scriptNextChart: string | undefined;
+let scriptFinish = false;
+const scriptContacts = new Set<string>();
+const scriptAudio = new Map<string, { source: AudioBufferSourceNode; gain: GainNode }>();
+const stop_script_audio = () => {
+    for (const { source, gain } of scriptAudio.values()) { source.stop(); source.disconnect(); gain.disconnect(); }
+    scriptAudio.clear();
+};
 let scriptLineIndex = new Map<any, number>();
 let scriptLastTime = 0;
 let scriptActionsActive = false;
@@ -156,6 +173,7 @@ judge.isBlocked = (x, y, time, width, height) => {
     return !!blockingBlockAt(C.chart.blocks || [], time, x, y, width, height);
 };
 const clear_block_input = (immediate = false) => {
+    scriptContacts.clear();
     judge.clearInput();
     blockFeedback.clear();
     if (immediate) blockAudio.reset();
@@ -218,7 +236,7 @@ const transitionScene = (to: string) => {
     if (to === 'result') {
         startResultMusic();
         C.resultStarted = sceneNow();
-        C.previousBest = recordResult(C.chart.dir || C.chart.info.name, C.resultStats?.score || 0);
+        C.previousBest = recordResult(C.chart.dir || C.chart.info.name, C.resultStats?.score || 0, !C.resultAutoplay);
         C.resultCollection = false;
         window.setTimeout(() => {
             if (C.scene === 'result' && Number(C.resultStats?.score || 0) >= 880000) C.resultCollection = true;
@@ -609,7 +627,8 @@ const load_audioele = async (url, on_progress?): Promise<HTMLAudioElement> => {
 // LevelControl.Start 加载 IllustrationBlur（256×135 / 6.25 PPU），不是高清曲绘。
 // BackgroundScaler 的世界大小仍为40.96×21.6、scale=.463，宽屏继续等比放大。
 // LeTai.Asset.TranslucentImage.ScalableBlur 再对屏幕捕获做四对角采样。
-let game_background_cache: { image: any; fx: any; width: number; height: number; canvas: HTMLCanvasElement } | null = null;
+let game_background_cache: { image: any; fx: any; width: number; height: number; canvas: HTMLCanvasElement;
+    shaded?: { dim: number; canvas: HTMLCanvasElement } } | null = null;
 const game_background = (w, h) => {
     const image = C.chart.background || C.chart.image;
     // 首个普通谱的背景绘制早于apply_postfx：在这里先建GL，不能缓存未模糊的首帧。
@@ -2108,6 +2127,8 @@ const script_state = (time: number): ScriptState => {
         progress: duration > 0 ? Math.max(0, Math.min(1, time / duration)) : 0,
         score: stats.score, accuracy: stats.accuracy, combo: stats.combo, maxCombo: stats.maxCombo,
         perfect: stats.perfect, good: stats.good, bad: stats.bad, miss: stats.miss, total: stats.total,
+        width: cv.width, height: cv.height, autoplay, exporting: !!C.video_export_active,
+        spectrum: scriptSpectrum?.meanSquare(time),
     };
 };
 
@@ -2134,13 +2155,28 @@ const apply_script_actions = () => {
             if (action.type === 'pause') pause();
             else if (action.type === 'play') play();
             else if (action.type === 'seek' && C.chart.data && !C.video_export_active && !lib_loading) seek(action.time);
+            else if (action.type === 'chart' && !C.video_export_active && !lib_loading) scriptNextChart = action.name;
+            else if (action.type === 'finish' && !C.video_export_active) scriptFinish = true;
+            else if (action.type === 'sound' && clock.running && !C.video_export_active) {
+                const buffer = C.chart.hitsounds?.[action.name];
+                if (buffer) {
+                    const source = actx.createBufferSource(), gain = actx.createGain();
+                    source.buffer = buffer; gain.gain.value = settings.volume * action.volume;
+                    source.connect(gain).connect(actx.destination); source.start();
+                    source.onended = () => { source.disconnect(); gain.disconnect(); };
+                }
+            }
         }
     } finally { scriptActionsActive = false; }
 };
 
 const dispose_script = () => {
+    stop_script_audio();
     chartScript?.dispose();
     chartScript = null;
+    scriptLoadingLevel = undefined;
+    scriptSpectrum = undefined; scriptPackCharts = undefined; scriptNextChart = undefined;
+    scriptFinish = false; scriptContacts.clear();
     scriptLineIndex.clear();
     scriptReportedErrors.clear();
 };
@@ -2160,10 +2196,26 @@ const render_scene = (sctx, t, mode?, preview = false, offscreen = false) => {
     sctx.globalCompositeOperation = "source-over";
     sctx.clearRect(0, 0, w, h);
     if (mode !== "fg") {
-        sctx.drawImage(game_background(w, h).canvas, 0, 0);
+        const background = game_background(w, h);
         // GameInformation默认背景亮度=.75，LevelStart动画末尾CanvasGroup.alpha=.7。
         // LevelInformation.Update把黑色Image.alpha设成1-背景亮度；两者相乘为.175。
-        sctx.fillRectEx(0, 0, w, h, `rgba(0, 0, 0, ${C.chart.data.rpen?.backgroundDim ?? (1 - (settings?.brightness ?? 0.65))})`);
+        const dim = C.chart.data.rpen?.backgroundDim ?? (1 - (settings?.brightness ?? 0.65));
+        const shade = `rgba(0, 0, 0, ${dim})`;
+        if (C.video_export_active) {
+            // The cover and brightness are static at the export resolution.
+            if (!background.shaded || background.shaded.dim !== dim) {
+                const canvas = document.createElement('canvas');
+                canvas.width = w; canvas.height = h;
+                const context = canvas.getContext('2d')!;
+                context.drawImage(background.canvas, 0, 0);
+                context.fillRectEx(0, 0, w, h, shade);
+                background.shaded = { dim, canvas };
+            }
+            sctx.drawImage(background.shaded.canvas, 0, 0);
+        } else {
+            sctx.drawImage(background.canvas, 0, 0);
+            sctx.fillRectEx(0, 0, w, h, shade);
+        }
         const tint = chartScript?.overlay.background;
         if (tint) sctx.fillRectEx(0, 0, w, h, `rgba(${tint.color.map(Math.round).join(',')}, ${tint.alpha})`);
     }
@@ -2507,6 +2559,27 @@ const render_frame_at = async (t_raw) => {
         const delta = Math.max(0, Math.min(.25, t - scriptLastTime));
         scriptLastTime = t;
         chartScript.update(clock.running || C.video_export_active ? delta : 0, script_state(t));
+        C.chart.music.volume = settings.volume * chartScript.overlay.musicVolume;
+        if (clock.running && !C.video_export_active) {
+            for (const [name, options] of chartScript.overlay.loops) {
+                const buffer = C.chart.hitsounds?.[name];
+                if (!buffer || options.volume <= 0) continue;
+                if (!scriptAudio.has(name)) {
+                    const source = actx.createBufferSource(), gain = actx.createGain();
+                    source.buffer = buffer; source.loop = true; source.playbackRate.value = options.rate;
+                    source.connect(gain).connect(actx.destination); source.start(0, Math.max(0, t * options.rate) % buffer.duration);
+                    scriptAudio.set(name, { source, gain });
+                }
+                const node = scriptAudio.get(name)!;
+                node.gain.gain.value = settings.volume * options.volume;
+                node.source.playbackRate.value = options.rate;
+            }
+        }
+        for (const [name, node] of scriptAudio) {
+            if (!clock.running || C.video_export_active || !chartScript.overlay.loops.get(name)?.volume) {
+                node.source.stop(); node.source.disconnect(); node.gain.disconnect(); scriptAudio.delete(name);
+            }
+        }
         apply_script_actions();
         report_script_errors();
     }
@@ -2518,7 +2591,19 @@ const render_frame_at = async (t_raw) => {
        （原版 BackCanvas B/2 在判定线/note 之下）。无方块谱仍整帧。 */
     const has_blocks = !!(C.chart.blocks && C.chart.blocks.length);
     const split = !!(((C.postfx_enabled && C.fx_eff) || has_blocks) && C.fx && !C.fx_failed);
-    await renderGameplayFrame({ output: cv, foreground: C.scene_cv, background: C.bg_cv }, t, t_raw, split, framePasses);
+    // Without a post-processing pass the encoder can consume the scene canvas directly.
+    const hasPostfx = C.postfx_enabled && (C.postfx || C.fx_eff);
+    const direct = C.video_export_active && !C.chart.rpen && !has_blocks && !hasPostfx;
+    await renderGameplayFrame({ output: cv, foreground: direct ? cv : C.scene_cv, background: C.bg_cv }, t, t_raw, split, framePasses);
+    const output = cv.getContext('2d')!;
+    drawScriptOverlay(output, chartScript?.overlay, C.chart.textures, t);
+    drawGameplayWatermark(output, settings.autoplay || C.video_export_active);
+    if (scriptNextChart) {
+        const name = scriptNextChart, next = scriptPackCharts?.[name];
+        scriptNextChart = undefined;
+        if (next) { await simulator.loadLocal(next); simulator.play(); }
+        else events.dispatchEvent(new CustomEvent('error', { detail: `脚本无法切换到曲包谱面：${name}` }));
+    }
 };
 
 const render = async () => {
@@ -2526,7 +2611,7 @@ const render = async () => {
     try {
         // 视频导出期间由 export_video 逐帧驱动，这里让位（否则两边抢同一张画布，
         // 也会把导出帧的时间戳搅乱）
-        if (!C.video_export_active) {
+        if (!C.video_export_active && !exportQueueActive) {
             // Monitor moves and browser zoom can change density without a resize event.
             if ((window.devicePixelRatio || 1) !== screen_pixel_density) resize_to_window();
             if (C.entrance?.painted) {
@@ -2565,7 +2650,7 @@ const render = async () => {
                 await geometryPipeline.exact(chartTime, aspect, true);
                 // Input, chart loads, resize and export may run while a worker is
                 // preparing. Never submit the captured frame after such a change.
-                if (C.video_export_active || chart !== C.chart.data || scene !== C.scene ||
+                if (C.video_export_active || exportQueueActive || chart !== C.chart.data || scene !== C.scene ||
                     generation !== clockGeneration || running !== clock.running || speed !== settings.speed || aspect !== game_chart_viewport().aspect ||
                     width !== cv.width || height !== cv.height || chartTime !== geometryTime(t_raw) ||
                     Math.abs(get_time() - t_raw) > .1) return;
@@ -2585,7 +2670,8 @@ const render = async () => {
                 C.sceneTransition.start = C.entrance.start;
             }
             events.dispatchEvent(new CustomEvent('frame', { detail: simulator.snapshot() }));
-            if (clock.running && t_raw >= C.chart.duration + .2 && !finishSent) {
+            if (clock.running && (t_raw >= C.chart.duration + .2 || scriptFinish) && !finishSent) {
+                scriptFinish = false;
                 finishSent = true;
                 if (chartScript) {
                     chartScript.finish(script_state(C.chart.duration));
@@ -2593,6 +2679,7 @@ const render = async () => {
                     chartScript.takeActions();
                 }
                 C.resultStats = simulator.snapshot().stats;
+                C.resultAutoplay = settings.autoplay;
                 pause();
                 transitionScene('game-over');
                 C.gameOverAt = sceneNow() + gameplayEndingSeconds;
@@ -2608,9 +2695,12 @@ const render = async () => {
 /* ---------------- 视频导出 ----------------
    Runtime 提供场景绘制及状态恢复；export/ 负责固定帧驱动、离线音频和独立编码器。 */
 let exportAbort: AbortController | null = null;
+type ExportChartSource = () => Promise<void>;
+let exportChartSource: ExportChartSource | undefined;
+let exportQueueActive = false;
 
-const video_export: { blob: Blob | null; name: string; done: number; total: number; status: string; error: unknown; perf0: number } = {
-    blob: null, name: "", done: 0, total: 0, status: "", error: null, perf0: 0
+const video_export: { name: string; done: number; total: number; status: string; perf0: number } = {
+    name: "", done: 0, total: 0, status: "", perf0: 0
 };
 
 /* 导出/跳转预置：t0 是音乐秒，先减谱面 offset，clicked ⇔ sect < 谱面秒。
@@ -2649,7 +2739,9 @@ const render_export_frame = async (plan: ExportTimeline, time: number, view: Par
     });
 };
 
-const export_video = async (opt: ExportScenes & { backend?: ExportBackend; encoding?: Partial<EncodingOptions>; browserCodec?: BrowserCodec; hardwareAcceleration?: HardwareAcceleration; fps?: number; width?: number; height?: number; start?: number; end?: number; bitrate?: number; audio?: boolean } = {}) => {
+type ExportOptions = ExportScenes & { backend?: ExportBackend; encoding?: Partial<EncodingOptions>; browserCodec?: BrowserCodec; hardwareAcceleration?: HardwareAcceleration; fps?: number; width?: number; height?: number; start?: number; end?: number; bitrate?: number; audio?: boolean };
+const export_video = async (opt: ExportOptions = {}, controller = new AbortController()) => {
+    checkCancelled(controller.signal);
     if (C.video_export_active) throw new Error("已有导出任务在跑");
     if (!C.chart || !C.chart.data || !C.chart.data.judgeLineList) throw new Error("尚未载入谱面");
 
@@ -2677,17 +2769,18 @@ const export_video = async (opt: ExportScenes & { backend?: ExportBackend; encod
     const previousCanvas = document.createElement('canvas'); previousCanvas.width = cv.width; previousCanvas.height = cv.height;
     previousCanvas.getContext('2d')!.drawImage(cv, 0, 0);
     const scoringBefore = { ...C.chart.scoring }, hudBefore = { score: C.game_hud.score, combo: C.game_hud.combo };
+    const scriptBefore = chartScript, scriptTimeBefore = scriptLastTime, volumeBefore = m?.volume;
+    let exportScript: ScriptHost | undefined;
     const frozenBefore = C.fx_eff?._frozen;
     const clickedBeforeExport = new Map<RuntimeNote, boolean>(C.chart.data.judgeLineList
         .flatMap(line => line.notes).map(note => [note, note.clicked]));
 
     C.video_export_active = true;
-    video_export.blob = null; video_export.error = null;
     video_export.done = 0; video_export.total = total;
     video_export.status = "准备中…";
     video_export.perf0 = 0;
 
-    const controller = new AbortController(); exportAbort = controller;
+    exportAbort = controller;
     try {
         stopResultMusic();
         if (m) pause();
@@ -2695,8 +2788,7 @@ const export_video = async (opt: ExportScenes & { backend?: ExportBackend; encod
         update_game_score(end + .2 - C.chart.data.offset + settings.offset / 1000);
         const scoring = C.chart.scoring;
         const view: Partial<SceneView> = {
-            // A zero score only reads the previous record; export never writes a new best.
-            tip: originalUI.nextTip(), previousBest: recordResult(C.chart.dir || C.chart.info.name, 0),
+            tip: originalUI.nextTip(), previousBest: recordResult(C.chart.dir || C.chart.info.name, 0, false), autoplay: true,
             stats: { perfect: scoring.perfect, good: 0, bad: 0, miss: 0, score: scoring.score, combo: scoring.combo,
                 maxCombo: scoring.max_combo, accuracy: 100, total: scoring.total },
         };
@@ -2707,6 +2799,16 @@ const export_video = async (opt: ExportScenes & { backend?: ExportBackend; encod
             C.fx_eff._frozen = start >= C.fx_eff.scalars.freezeTime;
         }
         resize_canvases(w, h);
+        if (C.chart.scripts?.length) {
+            // Live results finish the playback VM. Each export needs its own script state.
+            exportScript = createScriptHost(C.chart.scripts);
+            chartScript = exportScript;
+            scriptLastTime = geometryTime(start);
+            update_game_score(-Infinity);
+            const initialState = script_state(0);
+            exportScript.load(initialState);
+            exportScript.reset(initialState);
+        }
         await render_frame_at(start);          // 预热：RT 按新尺寸重建、贴图上传（不计进度）
 
         const status = (message: string) => { video_export.status = message; export_ui_progress(true); };
@@ -2724,19 +2826,21 @@ const export_video = async (opt: ExportScenes & { backend?: ExportBackend; encod
             video_export.done = done; export_ui_progress();
             events.dispatchEvent(new CustomEvent('exportframe', { detail: { index: done - 1, time: (done - 1) / fps, backend: opt.backend || 'ffmpeg' } }));
         });
-        video_export.blob = output.blob;
         video_export.name = export_filename(w, h, fps, output.extension);
         video_export.status = "完成";
         export_ui_progress(true);
-        return video_export.blob;
+        return output.blob;
     } catch (e) {
-        const error = controller.signal.aborted ? new Error("已取消") : e;
-        video_export.error = error;
-        throw error;
+        throw controller.signal.aborted ? new Error("已取消") : e;
     } finally {
         exportAbort = null;
+        exportScript?.dispose();
+        chartScript = scriptBefore;
+        scriptLastTime = scriptTimeBefore;
+        if (m && volumeBefore !== undefined) m.volume = volumeBefore;
         C.video_export_active = false;
         C.video_export_cancelled = false;
+        if (game_background_cache?.shaded) game_background_cache.shaded = undefined;
         const exportSeconds = sceneNow() - startedAt;
         Object.assign(C, sceneBefore);
         C.sceneTransition.start += exportSeconds;
@@ -2814,6 +2918,125 @@ const export_collect_opt = () => ({
     resultSeconds: parseFloat(ui.export_result_seconds.value) || 7,
 });
 
+type QueuedExport = {
+    source: ExportChartSource;
+    info: ChartInfo;
+    loadingInfo: ChartInfo;
+    settings: Settings;
+    options: ReturnType<typeof export_collect_opt>;
+};
+type QueuedVideo = { blob: Blob; name: string };
+const exportQueue = new RenderQueue<QueuedExport, QueuedVideo>(() => updateExportQueue());
+
+const downloadExport = ({ blob, name }: QueuedVideo) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+};
+
+const updateExportQueue = () => {
+    const items = exportQueue.items;
+    const waiting = items.filter(item => item.state === 'waiting').length;
+    const busy = exportQueueActive || C.video_export_active;
+    ui.export_go.disabled = busy;
+    ui.export_cancel.disabled = !busy;
+    ui.export_close.disabled = busy;
+    ui.export_isolation.disabled = busy;
+    el('#exp-enqueue').disabled = busy || !exportChartSource;
+    el('#exp-queue-run').disabled = busy || !waiting || !exportChartSource;
+    el('#exp-queue-stop').disabled = !exportQueue.running;
+    el('#exp-queue-status').textContent = `${waiting} 项待处理 · ${items.filter(item => item.state === 'done').length} 项完成`;
+    const labels = { waiting: '等待中', running: '处理中', done: '已完成', failed: '失败', cancelled: '已取消' };
+    const rows = items.map(item => {
+        const row = document.createElement('li');
+        const { info, options } = item.task;
+        const encoder = options.backend === 'webcodecs' ? `WebCodecs ${options.browserCodec}` : `FFmpeg ${options.encoding.codec}`;
+        row.dataset.state = item.state;
+        row.textContent = `${info.name || '未命名'} ${info.level || ''} · ${options.start}–${options.end} 秒 · ${options.width}×${options.height} / ${options.fps} FPS · ${encoder} · ${labels[item.state]}`;
+        if (item.error) row.append(`（${item.error}）`);
+        const button = (label: string, action: () => void) => {
+            const control = document.createElement('button');
+            control.type = 'button'; control.textContent = label; control.onclick = action;
+            row.append(' ', control);
+        };
+        if (item.result) button('下载', () => downloadExport(item.result!));
+        if (item.state === 'failed' || item.state === 'cancelled') button('重试', () => exportQueue.retry(item));
+        if (item.state !== 'running') button('移除', () => exportQueue.remove(item));
+        return row;
+    });
+    el('#exp-queue-items').replaceChildren(...rows);
+};
+
+const enqueueExport = () => {
+    if (!exportChartSource || lib_loading || exportQueueActive || C.video_export_active) return;
+    const options = export_collect_opt();
+    if (options.end <= options.start) {
+        ui.export_progress_wrap.hidden = false;
+        ui.export_status.textContent = '结束时间必须大于开始时间';
+        return;
+    }
+    exportQueue.add({ source: exportChartSource, options, settings: { ...settings }, info: { ...C.chart.info },
+        loadingInfo: { ...(C.loadingInfo || C.chart.info) } });
+};
+
+const runExportQueue = async () => {
+    if (exportQueueActive || C.video_export_active || lib_loading || !exportChartSource ||
+        !exportQueue.items.some(item => item.state === 'waiting')) return;
+    const original = { source: exportChartSource, info: C.chart.info, loadingInfo: C.loadingInfo, time: clock_t(), settings };
+    let reloaded = false;
+    const applySettings = (value: Settings) => {
+        const speedChanged = value.speed !== settings.speed;
+        settings = value;
+        C.postfx_enabled = value.effects;
+        if (speedChanged && C.chart.data) rebuild_click_effects();
+    };
+    exportQueueActive = true;
+    pause();
+    ui.export_progress_wrap.hidden = false;
+    try {
+        await exportQueue.run(async (job, controller) => {
+            applySettings(job.settings);
+            if (exportChartSource !== job.source) {
+                reloaded = true;
+                ui.export_progress_fill.value = 0;
+                ui.export_status.textContent = `正在加载 ${job.info.name}…`;
+                await job.source();
+                exportChartSource = job.source;
+            }
+            checkCancelled(controller.signal);
+            C.chart.info = { ...job.info };
+            C.loadingInfo = job.loadingInfo;
+            const blob = await export_video(job.options, controller);
+            return { blob, name: video_export.name };
+        });
+        ui.export_status.textContent = exportQueue.items.some(item => item.state === 'waiting') ? '队列已停止，待处理任务已保留' : '队列处理结束';
+    } finally {
+        try {
+            applySettings(original.settings);
+            if (exportChartSource !== original.source) {
+                const status = ui.export_status.textContent;
+                ui.export_status.textContent = '正在恢复原谱面…';
+                await original.source();
+                exportChartSource = original.source;
+                ui.export_status.textContent = status;
+            }
+            C.chart.info = original.info;
+            C.loadingInfo = original.loadingInfo;
+            if (reloaded) seek(original.time);
+        } catch (error) {
+            ui.export_status.textContent = `恢复原谱面失败：${error instanceof Error ? error.message : error}`;
+        } finally {
+            exportQueueActive = false;
+            export_est_update();
+            updateExportQueue();
+        }
+    }
+};
+
 const export_est_update = () => {
     const o = export_collect_opt();
     ui.export_result_seconds.disabled = !o.result;
@@ -2871,56 +3094,49 @@ const export_probe = async () => {
 };
 
 const open_export_panel = () => {
-    if (export_open() || C.video_export_active || lib_loading) return;
+    if (export_open() || C.video_export_active || exportQueueActive || lib_loading) return;
     if (!C.chart || !C.chart.data) return;
     pause();
+    ui.export_start.value = '0';
     ui.export_end.value = (C.chart.duration || 0).toFixed(2);
-    ui.export_bitrate.value = auto_bitrate(
-        parseInt(ui.export_w.value, 10) || 1920,
-        parseInt(ui.export_h.value, 10) || 1080,
-        parseInt(ui.export_fps.value, 10) || 60);
     ui.export_progress_wrap.hidden = true;
     ui.export_status.textContent = "";
     export_est_update();
     export_encoding_update();
+    updateExportQueue();
     ui.export_overlay.showModal();
 };
 
 const close_export_panel = () => {
-    if (!export_open() || C.video_export_active) return;
+    if (!export_open() || C.video_export_active || exportQueueActive) return;
     ui.export_overlay.close();
 };
 
 const export_cancel = () => {
-    if (!C.video_export_active) return;
-    C.video_export_cancelled = true;
+    if (!C.video_export_active && !exportQueue.running) return;
+    exportQueue.cancelCurrent();
     exportAbort?.abort();
     ui.export_status.textContent = "正在取消…";
 };
 
 const export_run_ui = async () => {
-    if (C.video_export_active) return;
+    if (C.video_export_active || exportQueueActive || lib_loading) return;
     ui.export_go.disabled = true;
     ui.export_cancel.disabled = false;
     ui.export_progress_wrap.hidden = false;
     ui.export_status.textContent = "准备中…";
     try {
-        const blob = await export_video(export_collect_opt());
+        const pending = export_video(export_collect_opt());
+        updateExportQueue();
+        const blob = await pending;
         ui.export_status.textContent =
             `完成：${video_export.name}（${(blob.size / 1048576).toFixed(1)} MB），开始下载`;
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = video_export.name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(a.href), 120000);
+        downloadExport({ blob, name: video_export.name });
     } catch (e) {
         ui.export_status.textContent = `导出失败：${(e && e.message) || e}`;
         console.error("视频导出失败：", e);
     } finally {
-        ui.export_go.disabled = false;
-        ui.export_cancel.disabled = true;
+        updateExportQueue();
     }
 };
 
@@ -3275,6 +3491,7 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
         return;
     }
     const hud = C.game_hud;
+    const display = chartScript?.overlay.display;
     const layout = game_hud_layout();
     const chartTime = t_raw - C.chart.data.offset + settings.offset / 1000;
     let hudTint: string | undefined;
@@ -3292,7 +3509,7 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
 
     // 原版进度取 nowTime / audioLength，nowTime = audioTime - 谱面 offset。
     const duration = C.chart.music.duration || C.chart.duration || 1;
-    const progress = Math.max(0, Math.min(1, (t_raw - C.chart.data.offset) / duration));
+    const progress = display?.progress ?? Math.max(0, Math.min(1, (t_raw - C.chart.data.offset) / duration));
     if (hud.imgs.progress && progress > 0) {
         const bar = layout.progress;
         attached('bar', bar.left, bar.height / 2, () => ctx.drawImage(sprite_tints.get(hud.imgs.progress, hudTint), bar.left + bar.span * progress - bar.width,
@@ -3306,10 +3523,10 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
     // Text is drawn about its vertical centre, while RPE attachUI pivots
     // are the top-right score corner and the bottom corners of name/level.
     attached('score', layout.score.x, layout.score.y - 50 / 2,
-        () => text(String(Math.round(hud.score)).padStart(7, "0"), 50, "right", layout.score.x, layout.score.y, 400));
-    if (hud.combo > 2) {
+        () => text(String(Math.round(display?.score ?? hud.score)).padStart(7, "0"), 50, "right", layout.score.x, layout.score.y, 400));
+    if (hud.combo > 2 || display?.combo) {
         attached('combonumber', layout.combo.x, layout.combo.y,
-            () => text(hud.combo, 70, "center", layout.combo.x, layout.combo.y, 400));
+            () => text(display?.combo || hud.combo, 70, "center", layout.combo.x, layout.combo.y, 400));
         ctx.save(); ctx.globalAlpha *= comboAlpha;
         attached('combo', layout.combo_text.x, layout.combo_text.y,
             () => text("COMBO", 24, "center", layout.combo_text.x, layout.combo_text.y, 200)); ctx.restore();
@@ -3318,7 +3535,7 @@ const draw_game_hud = (ctx: CanvasRenderingContext2D, t_raw: number, scaleY = 1,
     attached('name', layout.song.x, layout.song.y + 36 / 2,
         () => text(C.chart.info.name || "", 36, "left", layout.song.x, layout.song.y, name_width));
     // Gameplay 难度只显示整数部分（16.5 → 16），保留谱面库及原始定数。
-    const level = (C.chart.info.level || "").replace(/(\d+)\.\d+/g, "$1");
+    const level = (display?.level ?? C.chart.info.level ?? "").replace(/(\d+)\.\d+/g, "$1");
     attached('level', layout.level.x, layout.level.y + 36 / 2,
         () => text(level, 36, "right", layout.level.x, layout.level.y, name_width));
     // Cover overlays the entire HUD, including any attachUI-transformed parts.
@@ -3375,6 +3592,7 @@ const drawGameplayTransition = (ctx: CanvasRenderingContext2D, elapsed: number, 
     const side = originalUI.sample(clip, null, 'spriteBlending', elapsed, .8);
     draw_game_hud(ctx, musicTime, scaleY, comboAlpha, Math.max(0, Math.min(1, (side - .5) / .3)));
     ctx.restore();
+    drawGameplayWatermark(ctx, C.video_export_active || (ending ? C.resultAutoplay : settings.autoplay), scaleY);
 };
 
 // All UI geometry and curves come from the exported Unity scene hierarchy.
@@ -3382,8 +3600,9 @@ const drawSceneOverlay = (ctx: CanvasRenderingContext2D, scene = C.scene, elapse
     const transition = C.sceneTransition;
     const inLoading = scene === 'loading' || scene === 'loading-exit';
     const image = inLoading ? C.loadingImage || C.chart.image : C.chart.image;
+    const info = inLoading ? C.loadingInfo || C.chart.info || { name: '', level: '' } : C.chart.info;
     const view = {
-        info: inLoading ? C.loadingInfo || C.chart.info || { name: '', level: '' } : C.chart.info,
+        info: inLoading && scriptLoadingLevel !== undefined ? { ...info, level: scriptLoadingLevel } : info,
         image: image?.complete && image.naturalWidth ? image : undefined,
         background: C.chart.image ? game_background(cv.width, cv.height).canvas : undefined,
         frame: undefined,
@@ -3392,6 +3611,7 @@ const drawSceneOverlay = (ctx: CanvasRenderingContext2D, scene = C.scene, elapse
         elapsed,
         collection: C.resultCollection,
         previousBest: C.previousBest || 0,
+        autoplay: C.resultAutoplay,
         showName: settings.playerShowName,
         tip: C.loadingTip,
         ...overrides,
@@ -3451,7 +3671,7 @@ const startMusic = () => {
     void actx.resume();
     blockAudio.attach(m);
     m.playbackRate = settings.speed;
-    m.volume = settings.volume;
+    m.volume = settings.volume * (chartScript?.overlay.musicVolume ?? 1);
     if (t < m.duration) {
         m.currentTime = Math.max(0, t);
         m.play().catch(error => {
@@ -3498,6 +3718,7 @@ const play = () => {
 };
 
 const pause = () => {
+    stop_script_audio();
     C.resumeAt = 0;
     if (C.entrance) preparePlayback();
     if (!C.chart.music) return;
@@ -3698,11 +3919,18 @@ const init_player = async () => {
     });
 
     /* 导出视频面板 */
+    const saveExportSettings = bindExportSettings(ui.export_overlay);
+    el('#exp-enqueue').onclick = () => { saveExportSettings(); enqueueExport(); };
+    el('#exp-queue-run').onclick = runExportQueue;
+    el('#exp-queue-stop').onclick = () => {
+        exportQueue.stop();
+        ui.export_status.textContent = '正在停止队列…';
+    };
     ui.btn_export.onclick = open_export_panel;
     ui.export_close.onclick = close_export_panel;
     ui.export_overlay.addEventListener('cancel', e => {
         e.preventDefault();
-        if (C.video_export_active) export_cancel();
+        if (C.video_export_active || exportQueueActive) export_cancel();
         else close_export_panel();
     });
     ui.export_overlay.onclick = e => {
@@ -3711,27 +3939,35 @@ const init_player = async () => {
     for (const key of ["export_w", "export_h", "export_fps", "export_bitrate", "export_start", "export_end", "export_result_seconds"]) {
         ui[key].addEventListener("input", export_est_update);
     }
-    for (const key of ['export_w','export_h','export_fps']) ui[key].addEventListener('input', () => {
+    const export_size_changed = () => {
         exportProbeSequence++;
         document.getElementById('exp-capabilities')!.textContent = '参数已更改，可重新检测编码支持。';
         for (const option of ui.export_browser_codec.options) option.disabled = false;
-    });
+    };
+    for (const key of ['export_w','export_h','export_fps']) ui[key].addEventListener('input', export_size_changed);
     ui.export_audio.addEventListener("change", export_est_update);
     for (const key of ['export_backend','export_codec','export_container','export_rate_control','export_preset','export_pixel_format','export_prores_profile','export_audio_codec']) ui[key].addEventListener('change', export_encoding_update);
     for (const key of ['export_crf','export_audio_bitrate','export_keyframe']) ui[key].addEventListener('input', export_est_update);
     ui.export_probe.onclick = () => { void export_probe(); };
     ui.export_hardware.onchange = () => { void export_probe(); };
     ui.export_threading.onchange = export_encoding_update;
-    ui.export_isolation.onclick = () => { void import("../render/video/isolation").then(module => module.toggleIsolation()).catch(error => { ui.export_status.textContent = String(error); }); };
+    ui.export_isolation.onclick = () => {
+        void import("../render/video/isolation").then(module => {
+            if (!C.video_export_active && !exportQueueActive) return module.toggleIsolation();
+        }).catch(error => { ui.export_status.textContent = String(error); });
+    };
     ui.export_loading.addEventListener("change", export_est_update);
     ui.export_result.addEventListener("change", export_est_update);
-    ui.export_p720.onclick = () => { ui.export_w.value = "1280"; ui.export_h.value = "720"; export_est_update(); };
-    ui.export_p1080.onclick = () => { ui.export_w.value = "1920"; ui.export_h.value = "1080"; export_est_update(); };
-    ui.export_pwin.onclick = () => {
-        ui.export_w.value = String(window.innerWidth);
-        ui.export_h.value = String(window.innerHeight);
+    const setExportSize = (width: number, height: number) => {
+        ui.export_w.value = String(width);
+        ui.export_h.value = String(height);
+        export_size_changed();
         export_est_update();
+        saveExportSettings();
     };
+    ui.export_p720.onclick = () => setExportSize(1280, 720);
+    ui.export_p1080.onclick = () => setExportSize(1920, 1080);
+    ui.export_pwin.onclick = () => setExportSize(window.innerWidth, window.innerHeight);
     ui.export_whole.onclick = () => {
         ui.export_start.value = "0";
         ui.export_end.value = (C.chart.duration || 0).toFixed(2);
@@ -3742,7 +3978,7 @@ const init_player = async () => {
         ui.export_end.value = (C.chart.duration || 0).toFixed(2);
         export_est_update();
     };
-    ui.export_go.onclick = export_run_ui;
+    ui.export_go.onclick = () => { saveExportSettings(); void export_run_ui(); };
     ui.export_cancel.onclick = export_cancel;
 
     ui.progress_wrap.oninput = () => {
@@ -3752,7 +3988,7 @@ const init_player = async () => {
     window.addEventListener('keydown', e => {
         if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
         if (!C.chart.data) return;
-        if (C.video_export_active) {
+        if (C.video_export_active || exportQueueActive) {
             if (e.code === "Escape") { e.preventDefault(); export_cancel(); }
             return;                      // 导出期间锁输入：空格/方向键别去碰播放时钟
         }
@@ -3782,6 +4018,8 @@ const init_player = async () => {
 };
 
 function reset_judge(time = -Infinity, notifyScript = true) {
+    stop_script_audio();
+    scriptContacts.clear(); scriptNextChart = undefined; scriptFinish = false;
     const notes: RuntimeNote[] = C.chart.data.judgeLineList.flatMap(line => line.notes);
     judge.reset(notes, time);
     judgementSeconds = 0;
@@ -3811,6 +4049,7 @@ export const simulator = {
         await init_player();
     },
     async load(entry: { path: string; asset?: string; cover?: string; anomaly?: string; name?: string; level?: string; composer?: string; charter?: string; illustrator?: string }) {
+        exportChartSource = undefined;
         pause();
         dispose_script();
         preparePlayback();
@@ -3821,10 +4060,13 @@ export const simulator = {
         lib_loading = true;
         try {
             await load_chart(R(entry.path), R(entry.asset || entry.path), entry.anomaly, entry.cover ? R(entry.cover) : undefined);
+            const source = { ...entry };
+            exportChartSource = () => simulator.load(source);
             this.ready();
         } finally { lib_loading = false; ui.loading_overlay.hidden = true; }
     },
     async loadLocal(chart: LocalChart) {
+        exportChartSource = undefined;
         pause();
         dispose_script();
         preparePlayback();
@@ -3852,7 +4094,7 @@ export const simulator = {
             C.chart.textures?.dispose();
             C.chart.fonts?.dispose(); sprite_tints.clear(); hit_effects.clear();
             C.chart = { info: chart.info, data: structuredClone(chart.data), music, image, background: null,
-                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id, textures, fonts, hitsounds, rpen };
+                postfx: chart.postfx || null, blocks: [], dir: chart.id, assetDir: chart.id, textures, fonts, hitsounds, rpen, scripts: chart.scripts };
             C.loadingImage = image; C.resultImage = image;
             C.postfx = chart.postfx || null;
             C.glitch_img = null;
@@ -3860,15 +4102,22 @@ export const simulator = {
             game_background_cache = null;
             init_chart();
             chartScript = chart.scripts?.length ? createScriptHost(chart.scripts) : null;
+            scriptPackCharts = chart.packCharts;
+            if (chart.scripts?.some(script => /\bstate\.spectrum\b/.test(script.source))) {
+                scriptSpectrum = new Spectrum(await actx.decodeAudioData(await chart.music.arrayBuffer()), spectrumCadence(chart.scripts));
+            }
             scriptReportedErrors.clear();
             reset_judge(0, false);
             chartScript?.load(script_state(0));
             chartScript?.reset(script_state(0));
+            // Capture the opening label before gameplay updates the script display.
+            scriptLoadingLevel = chartScript?.overlay.display.level;
             report_script_errors();
             if (chartScript?.errors.length) {
                 chart.data.warnings ??= [];
                 for (const error of chartScript.errors) if (!chart.data.warnings.includes(error)) chart.data.warnings.push(error);
             }
+            exportChartSource = () => simulator.loadLocal(chart);
             this.ready();
         } catch (error) { rpen?.dispose(); textures?.dispose(); fonts?.dispose(); urls.forEach(value => URL.revokeObjectURL(value)); throw error; }
         finally { lib_loading = false; }
@@ -3895,7 +4144,7 @@ export const simulator = {
         });
         if (speedChanged && C.chart.data) rebuild_click_effects();
         clock_seek(t);
-        if (C.chart.music) { C.chart.music.playbackRate = settings.speed; C.chart.music.volume = settings.volume; }
+        if (C.chart.music) { C.chart.music.playbackRate = settings.speed; C.chart.music.volume = settings.volume * (chartScript?.overlay.musicVolume ?? 1); }
         C.postfx_enabled = settings.effects;
         if (modeChanged && C.chart.data) seek(0);
         return profileReady;
@@ -3909,7 +4158,9 @@ export const simulator = {
         return {
             scene: C.scene,
             loaded: !!C.chart.data, playing: clock.running, time: get_time(), duration: C.chart.duration || 0,
-            info: C.chart.info, exporting: !!C.video_export_active,
+            info: C.chart.info, exporting: !!C.video_export_active || exportQueueActive,
+            script: chartScript ? { errors: [...chartScript.errors], display: { ...chartScript.overlay.display },
+                controls: [...chartScript.overlay.elements].filter(([, value]) => value.action).map(([id, value]) => ({ id, ...value })) } : undefined,
             blockedTouches: judge.blockedTouches.length,
             stats: settings.autoplay ? {
                 ...judge.stats, perfect: C.chart.scoring?.perfect || 0, good: 0, bad: 0, miss: 0,
@@ -3921,6 +4172,12 @@ export const simulator = {
     avatars() { return originalUI.avatars(); },
     play() { play(); },
     pause,
+    pauseOnFocusLoss() {
+        // Pausing changes clockGeneration, which invalidates an in-flight frame.
+        if (C.video_export_active || exportQueueActive) return;
+        pause();
+        clear_block_input();
+    },
     seek(value: number) { if (C.chart.data && !C.video_export_active) seek(value); },
     restart() {
         if (!C.chart.data || C.video_export_active || lib_loading) return;
@@ -3929,7 +4186,13 @@ export const simulator = {
         beginEntrance(true);
     },
     hit(id: string, x: number, y: number, kind: 'tap' | 'move' | 'release', keyboard = false) {
-        if (!clock.running || settings.autoplay || C.video_export_active || lib_loading || export_open()) return;
+        if (kind === 'release' && scriptContacts.delete(id)) return;
+        if (!clock.running || C.video_export_active || lib_loading || export_open()) return;
+        if (scriptContacts.has(id)) return;
+        if (!keyboard && kind === 'tap' && chartScript?.pointer(x / cv.width, y / cv.height, script_state(script_time()))) {
+            scriptContacts.add(id); apply_script_actions(); report_script_errors(); return;
+        }
+        if (settings.autoplay) return;
         judge.input(id, x, y, kind, get_time() - C.chart.data.offset + settings.offset / 1000, cv.width, cv.height, keyboard);
         update_block_feedback();
     },
